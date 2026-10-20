@@ -1,18 +1,40 @@
 # judge-my-ai-habits
 
-A bell curve for AI-assisted work. Every session in which you worked with an AI
-agent gets two scores. **Complexity** is how much work it would take a skilled
-professional, working without AI, to do everything you asked for, from a couple
-of minutes up to months of work for a team. **Leverage** is how much of the work
-you delegated versus steered, from a question answered from the model's own
-knowledge up to an autonomous loop of agents working for days. The scores land
-in SQLite, so you can plot the distribution, track its mean over time, and merge
-results from every machine and every agent harness you use.
+See how effectively you work with AI, and how your habits are changing over time.
 
-The point is the shape, not the count. "How many sessions did I run?" says
-almost nothing. "Where is the bulk of my work on a scale from a minute to
-team-months, and is it moving right, toward bigger jobs and more delegation?"
-says a lot.
+It reads your past sessions with an AI agent and has a model judge each one on
+two things:
+
+- **Complexity:** how big was the work you asked for? From a couple of minutes
+  up to months of work for a team.
+- **Leverage:** how much of it did you hand over? From a question answered on
+  the spot up to an autonomous loop of agents.
+
+Then it shows where most of your work sits, and whether it has moved toward
+bigger jobs and more delegation than in the months before.
+
+### Try it
+
+Paste this into the coding agent you use most:
+
+```text
+Run judge-my-ai-habits (https://github.com/adunne09/judge-my-ai-habits) on my
+sessions in the harness you're running in right now.
+
+1. If the repo isn't cloned locally yet, clone it. Read README.md.
+2. Check the "Supported harnesses" table in README.md and the HARNESSES registry
+   in session-complexity. If the current harness isn't supported, stop and tell
+   me. Don't try to add support.
+3. If TYPESAFE_API_KEY isn't set, ask me for it. Never print, log, or commit it.
+4. Run `./session-complexity --harness <id>` with the current harness's id, then
+   `./session-complexity report`. Only read the harness's data; never modify it.
+5. In a few sentences, tell me how my last 30 days compare with the time before
+   (complexity, leverage, tokens), and give me the dashboard path it printed.
+```
+
+Each session's summary is sent to [TypeSafe](https://www.typesafe.ai)'s Jev for
+scoring; the results stay on your machine. If your harness isn't supported yet,
+see [Add support for another harness](#add-support-for-another-harness).
 
 ![Complexity histogram](charts/complexity.svg)
 
