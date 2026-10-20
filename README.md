@@ -20,6 +20,27 @@ says a lot.
 
 ![Weekly trend](charts/trend.svg)
 
+### Interactive dashboard
+
+Every scoring run also writes a self-contained, interactive HTML dashboard and
+prints its path. It has no external requests and works offline:
+
+![Dashboard](charts/dashboard.png)
+
+Click through time ranges and comparison windows. You can also:
+
+- Switch the curve between complexity and leverage.
+- Click a bar or a week to list its sessions.
+- Explore the size × delegation map.
+- Sort and search every session, and open any one to see how Jev split its judgment.
+
+Settings are kept in the URL, so a view can be bookmarked.
+
+```sh
+./session-complexity dashboard          # re-render from the database and print the path
+./session-complexity dashboard --open   # …and open it in your browser
+```
+
 ## How it works
 
 - **One scoring request per session.** A session's user messages, the agent's
@@ -86,9 +107,10 @@ Linux, a supported harness, and a TypeSafe API key.
 
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
-./session-complexity                   # score new or changed sessions on this machine
+./session-complexity                   # score new or changed sessions, then render the dashboard
 ./session-complexity report            # recent change, histograms, tokens, and a monthly trend
 ./session-complexity report --by week
+./session-complexity dashboard --open  # interactive HTML dashboard
 python3 make_charts.py                 # regenerate the SVG charts in this README from the DB
 ```
 
@@ -470,7 +492,9 @@ and run `./session-complexity report`. Spot-check the 10 most and 10 least
 complex personal sessions, what was filtered out as tests, scripted jobs, or
 forks, and the leverage distribution. If a database from another harness is
 available, merge them (`./session-complexity merge a.sqlite b.sqlite -o all.sqlite`)
-and confirm there's no scorer-hash warning.
+and confirm there's no scorer-hash warning. Render the merged dashboard
+(`./session-complexity dashboard --db all.sqlite`) and check that the new
+harness appears in its harness filter and looks right.
 
 Step 6: Document. In README.md, mark the harness as supported in the harness
 table, add a "Harness notes" subsection (where the data comes from, mapping
@@ -485,7 +509,8 @@ unsure about.
 
 | Path | What it is |
 | --- | --- |
-| `session-complexity` | The tool: harness adapters, state builder, Jev client, `score`, `merge`, `report` |
+| `session-complexity` | The tool: harness adapters, state builder, Jev client, `score`, `merge`, `report`, `dashboard` |
+| `dashboard.html` | Template for the interactive dashboard; `dashboard` fills it with data from the database |
 | `SPEC.md` | Harness-independent specification of the method |
 | `make_charts.py` | Regenerates `charts/*.svg` from a results database |
 | `validation/agreement.py` | Spearman and error between your hand labels and the scores |

@@ -731,6 +731,10 @@ def cmd_score(args):
     db.commit()
     print(f"done: {counts}; Jev input tokens {tokens:,} (~${tokens * 0.042 / 1e6:.4f})", file=sys.stderr)
     print(f"database: {pathlib.Path(args.db).expanduser()}", file=sys.stderr)
+    try:
+        print(f"dashboard: {render_dashboard(args.db)}", file=sys.stderr)
+    except Exception as e:  # the scores are saved either way
+        print(f"warning: could not render the dashboard: {e}", file=sys.stderr)
 
 
 def cmd_merge(args):
@@ -756,6 +760,53 @@ def cmd_merge(args):
 
 
 DAY_MS = 86_400_000
+DASHBOARD_TEMPLATE = pathlib.Path(__file__).resolve().parent / "dashboard.html"
+
+
+def dashboard_payload(db, db_path, recent_days=30, baseline_days=180):
+    cols = ("session_id, harness, machine, title, created_ms, complexity, leverage, tokens_total, cost_usd, origin, fork_of, launched_by_program, "
+            "scope, expertise, systems, open_endedness, " + ", ".join(f"complexity_p{i}" for i in range(7)) +
+            ", tool_calls, subagent_sessions, user_messages, active_seconds, directory, jev_model, scorer_hash")
+    r2 = lambda v, n=3: None if v is None else round(v, n)  # noqa: E731
+    sessions = []
+    for r in db.execute(f"SELECT {cols} FROM sessions WHERE status = 'scored' AND complexity IS NOT NULL"):
+        (sid, harness, machine, title, created, cx, lev, tokens, cost, origin, fork, launched,
+         scope, expertise, systems, open_e, *rest) = r
+        probs, (tools, subs, users, active, directory, _, _) = rest[:7], rest[7:]
+        sessions.append({
+            "id": sid, "h": harness or "opencode", "m": machine, "ti": title, "t": created,
+            "c": r2(cx), "l": r2(lev), "k": tokens, "$": r2(cost, 4), "o": origin or "unknown",
+            "f": int(bool(fork)), "lp": int(bool(launched)),
+            "p": int(origin == "personal_work" and not fork and not launched),
+            "sc": r2(scope, 2), "ex": r2(expertise, 2), "sy": r2(systems, 2), "oe": r2(open_e, 2),
+            "pr": [r2(p) for p in probs], "tc": tools, "sa": subs, "um": users, "as": active, "d": directory,
+        })
+    models = [m for (m,) in db.execute("SELECT DISTINCT jev_model FROM sessions WHERE status='scored' AND jev_model IS NOT NULL")]
+    scorers = [h for (h,) in db.execute("SELECT DISTINCT scorer_hash FROM sessions WHERE status='scored' AND scorer_hash IS NOT NULL")]
+    return {"meta": {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "db": tidy(str(db_path)),
+                     "models": models, "scorers": scorers, "recent_days": recent_days, "baseline_days": baseline_days},
+            "sessions": sessions}
+
+
+def render_dashboard(db_path, out=None, recent_days=30, baseline_days=180):
+    """Fill the dashboard template with the database's scored sessions; return the output path."""
+    db_path = pathlib.Path(db_path).expanduser()
+    if not DASHBOARD_TEMPLATE.exists():
+        raise FileNotFoundError(f"dashboard template not found at {DASHBOARD_TEMPLATE}")
+    db = sqlite3.connect(str(db_path))
+    payload = json.dumps(dashboard_payload(db, db_path, recent_days, baseline_days), separators=(",", ":"), ensure_ascii=False)
+    html = DASHBOARD_TEMPLATE.read_text(encoding="utf-8").replace("__JMAIH_DATA__", payload.replace("</", "<\\/"))
+    out = pathlib.Path(out).expanduser() if out else db_path.parent / "dashboard.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html, encoding="utf-8")
+    return out
+
+
+def cmd_dashboard(args):
+    path = render_dashboard(args.db, args.output, args.recent_days, args.baseline_days)
+    print(path)
+    if args.open:
+        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(path)], check=False)
 
 
 def human_tokens(n):
@@ -803,7 +854,7 @@ def window_summary(rows, days):
     """rows: (created_ms, period, complexity, leverage, tokens). days: window length actually covered."""
     cx = describe([r[2] for r in rows])
     lev = describe([r[3] for r in rows if r[3] is not None])
-    tok = [r[4] for r in rows]
+    tok = [r[4] for r in rows if r[4] is not None]
     per30 = 30 / days if days else 0
     return {
         "n": len(rows), "days": days, "sessions_30d": len(rows) * per30,
@@ -874,7 +925,7 @@ def cmd_report(args):
               f"{forks} forks, {launcher} launcher-created; categories may overlap)")
         table = "human_sessions WHERE 1=1"
     period = {"month": "month", "week": "week", "day": "day"}[args.by]
-    rows = db.execute(f"SELECT created_ms, {period}, complexity, leverage, COALESCE(tokens_total, 0) FROM {table}{win} ORDER BY created_ms", params).fetchall()
+    rows = db.execute(f"SELECT created_ms, {period}, complexity, leverage, tokens_total FROM {table}{win} ORDER BY created_ms", params).fetchall()
     if not rows:
         print("no scored sessions in this period")
         return
@@ -896,7 +947,7 @@ def cmd_report(args):
         print("levels: 0 answered from knowledge · 1 a lookup or two · 2 steered step by step · 3 delegated a goal · 4 orchestrated agents · 5 autonomous loop\n")
         histogram(lev, 0.5, 10)
 
-    tok = [r[4] for r in rows]
+    tok = [r[4] for r in rows if r[4] is not None] or [0]
     span_days = max(1.0, (end_ms - first) / DAY_MS)
     print(f"\nTokens (including subagents): total {human_tokens(sum(tok))} · per 30 days {human_tokens(sum(tok) * 30 / span_days)}"
           f" · per session mean {human_tokens(sum(tok) / len(tok))}, median {human_tokens(sorted(tok)[len(tok) // 2])}")
@@ -907,7 +958,7 @@ def cmd_report(args):
         groups.setdefault(r[1], []).append(r)
     for p, rs in groups.items():
         n, mean, sd, med = describe([r[2] for r in rs])
-        print(f"  {p}  n={n:4d}  complexity mean={mean:.2f} sd={sd:.2f} median={med:.2f}  tokens={human_tokens(sum(r[4] for r in rs)):>7}  {'▇' * round(mean * 8)}")
+        print(f"  {p}  n={n:4d}  complexity mean={mean:.2f} sd={sd:.2f} median={med:.2f}  tokens={human_tokens(sum(r[4] for r in rs if r[4] is not None)):>7}  {'▇' * round(mean * 8)}")
 
 
 def main():
@@ -935,11 +986,17 @@ def main():
     r.add_argument("--until", help="only sessions created on or before this date, YYYY-MM-DD (default: now); also ends the recent window")
     r.add_argument("--recent-days", type=int, default=30, help="length of the recent window compared against the baseline (default 30)")
     r.add_argument("--baseline-days", type=int, default=180, help="length of the baseline window just before the recent one (default 180)")
+    d = sub.add_parser("dashboard", help="render the interactive HTML dashboard and print its path")
+    d.add_argument("--db", default=str(DEFAULT_DB))
+    d.add_argument("-o", "--output", help="where to write the HTML (default: dashboard.html next to the database)")
+    d.add_argument("--recent-days", type=int, default=30, help="initial recent window (default 30; changeable in the page)")
+    d.add_argument("--baseline-days", type=int, default=180, help="initial baseline window (default 180; changeable in the page)")
+    d.add_argument("--open", action="store_true", help="open it in the default browser")
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("score", "merge", "report", "-h", "--help"):
+    if not argv or argv[0] not in ("score", "merge", "report", "dashboard", "-h", "--help"):
         argv = ["score"] + argv
     args = p.parse_args(argv)
-    {"score": cmd_score, "merge": cmd_merge, "report": cmd_report}[args.cmd](args)
+    {"score": cmd_score, "merge": cmd_merge, "report": cmd_report, "dashboard": cmd_dashboard}[args.cmd](args)
 
 
 if __name__ == "__main__":

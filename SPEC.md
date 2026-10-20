@@ -75,7 +75,7 @@ Field names follow the reference adapter. An adapter maps its harness's data ont
 | `parentID` | yes, if the harness has subagents | Parent session id for child sessions |
 | `fork.sessionID` | no | Set when the session was forked or branched from another. Forks are excluded from the personal set |
 | `metadata.source`, `permissions` | no | Any deterministic sign that a **program**, not a person, created the session: SDK/API launch, scheduler, CI, headless `-p` mode. It sets `launched_by_program = 1` |
-| `tokens.{input,output,reasoning,cache.read,cache.write}`, `cost` | no | Usage, summed with child sessions into `tokens_total` and `cost_usd` |
+| `tokens.{input,output,reasoning,cache.read,cache.write}`, `cost` | no | Usage, summed with child sessions into `tokens_total` and `cost_usd`. If the harness doesn't record usage, store **NULL**, never 0: reports and the dashboard treat NULL as unknown and show coverage, while a 0 would drag every token average down |
 | `model.{providerID,id}`, `agent`, `location.directory`, `projectID`, `outcome` | no | Descriptive columns |
 
 ### Common message format
@@ -274,6 +274,14 @@ include the **change** between two trailing windows ending at `--until` or now:
   median; leverage mean; `tokens_total` per 30 days; and mean and median tokens
   per session. Rates use each window's actual covered length, so windows of
   different lengths compare fairly.
+
+### Dashboard
+
+`dashboard` (and every `score` run) fills `dashboard.html` with the scored rows
+of the database and writes a self-contained HTML file next to it. The dashboard
+reads **only the database**, never a harness. So any adapter that writes this
+schema, with the same column meanings and NULL for unknown values, shows up in
+it automatically, with harness and machine filters once there's more than one.
 
 ## 8. Validating a new harness
 
