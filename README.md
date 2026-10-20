@@ -1,14 +1,60 @@
-# opencode-session-complexity
+# session-complexity
 
-Scores every OpenCode v2 session on a machine for how complex the work was, using
-TypeSafe's Jev model, and writes the results to SQLite so you can plot the
-distribution and watch it move over time. Databases from several machines merge
-into one.
+A bell curve for AI-assisted work. Every session in which you worked with an AI
+agent gets two scores: **complexity** — how much work it would take a skilled
+professional, working without AI, to do everything you asked for (from a couple
+of minutes up to months of work for a team) — and **leverage** — how much of the
+work you delegated versus steered (from a question answered from knowledge, up
+to an autonomous loop of agents working for days). The scores land in SQLite, so
+you can plot the distribution, track its mean over time, and merge results from
+every machine you work on.
 
-It's a single Python file with no dependencies. It needs Python 3.9+, OpenCode v2
+The point is the shape, not the count. "How many sessions did I run?" says
+almost nothing. "Where is the bulk of my work on a scale from a minute to
+team-months, and is it moving right — bigger jobs, more delegation?" says a lot.
+
+![Complexity histogram](charts/complexity.svg)
+
+![Leverage histogram](charts/leverage.svg)
+
+![Weekly trend](charts/trend.svg)
+
+## How it works
+
+- **One scoring request per session.** A session's user messages, the agent's
+  actions, its final reply, and a few computed facts about how the session ran
+  (steps per message, active working time, subagents launched, other AI tools
+  invoked) are sent as one state to [TypeSafe](https://www.typesafe.ai)'s Jev
+  scoring model, which answers several questions in parallel over that state.
+- **Complexity is a 7-level scale anchored at both ends.** The bottom is
+  calibrated on the smallest real sessions (greetings, tool checks, questions
+  answered from knowledge). The top is anchored on the most complex usage
+  people post about publicly: autonomous multi-agent campaigns — a two-week
+  framework migration shipped as ~600 pull requests, a compiler port, hundreds
+  of designed proteins sent for lab testing. Those score 5.3–6.0, above any
+  session recorded so far, so the top of the scale has headroom.
+- **Leverage is judged separately from size.** A tiny task can be delegated
+  ("clean this up") and a huge one can be steered. The scale runs from answered
+  from knowledge → a lookup → steered step by step → delegated goal →
+  orchestrated agents → autonomous loop.
+- **Only personal work feeds the trend.** Each session also gets an origin
+  classification (personal work, scripted job, test/benchmark) plus deterministic
+  flags for forks and program-launched sessions. The report tracks the personal
+  subset; everything else is scored too but excluded from the bell curve.
+- **Validated against hand labels.** Ranked against 65 sessions rated by hand
+  (31 development, 34 blind holdout), the headline score agrees at Spearman
+  0.96 / 0.95. Repeat runs differ by at most 0.05.
+- **Comparable over time.** The model is pinned, and every row records the
+  scorer hash and model version; changing the questions rescores everything
+  automatically.
+- **Mergeable.** Each machine writes its own SQLite database; databases merge
+  into one without losing rows.
+
+The current implementation reads sessions from a local OpenCode v2 install —
+it's a single Python file with no dependencies, needing Python 3.9+, OpenCode v2
 on `PATH` (or in `~/.opencode/bin`), and a TypeSafe API key. It reads sessions
 through `opencode api`, so it works with whatever server and storage the global
-installation uses. It never opens OpenCode's database directly.
+installation uses, and never opens OpenCode's database directly.
 
 ## Run it
 
@@ -17,6 +63,7 @@ export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
 ./session-complexity                   # score new or changed sessions on this machine
 ./session-complexity report            # histogram plus a monthly trend
 ./session-complexity report --by week
+python3 make_charts.py                 # regenerate the SVG charts in this README from the DB
 ```
 
 Results go to `~/.local/share/opencode-session-complexity/sessions.sqlite`. Change
