@@ -103,7 +103,7 @@ history there is, and there's no baseline yet. Example:
 ```text
 CHANGE — last 30 days vs the 180 days before:
   recent:   Sep 20, 2026 – Oct 20, 2026 (30 days)
-  baseline: Aug 3, 2026 – Sep 19, 2026 (48 days; all the history there is, 180 requested)
+  baseline: Aug 3, 2026 – Sep 20, 2026 (48 days; all the history there is, 180 requested)
 
                                   recent   baseline   change
   sessions                           248        253
