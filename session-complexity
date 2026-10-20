@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""judge-my-agent-habits: rate every AI agent session on this machine with TypeSafe's Jev.
+"""judge-my-ai-habits: rate every AI agent session on this machine with TypeSafe's Jev.
 
 Reads sessions from a supported agent harness (currently OpenCode v2, through
 `opencode api`), asks Jev how much work each session represents and how it was
@@ -36,7 +36,7 @@ TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 HOME = str(pathlib.Path.home())
 HARNESS = "opencode"
 _DATA = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share"))
-_NEW_DB = _DATA / "judge-my-agent-habits" / "sessions.sqlite"
+_NEW_DB = _DATA / "judge-my-ai-habits" / "sessions.sqlite"
 _LEGACY_DB = _DATA / "opencode-session-complexity" / "sessions.sqlite"  # pre-rename location
 DEFAULT_DB = _LEGACY_DB if _LEGACY_DB.exists() and not _NEW_DB.exists() else _NEW_DB
 
@@ -445,7 +445,7 @@ class Jev:
             req = urllib.request.Request(TYPESAFE_URL, data=body, method="POST", headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": f"judge-my-agent-habits/{SCORER_VERSION}",
+                "User-Agent": f"judge-my-ai-habits/{SCORER_VERSION}",
             })
             try:
                 with urllib.request.urlopen(req, timeout=90) as r:
@@ -755,65 +755,159 @@ def cmd_merge(args):
             print(f"  scorer={h[0]} model={h[1]} rows={h[2]}", file=sys.stderr)
 
 
+DAY_MS = 86_400_000
+
+
+def human_tokens(n):
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(n) >= size:
+            return f"{n / size:.2f}{unit}"
+    return f"{n:.0f}"
+
+
+def pct_change(new, old):
+    return f"{(new - old) / old * 100:+.1f}%" if old else "n/a"
+
+
+def describe(xs):
+    """n, mean, sd, median of a list of numbers (None for an empty list)."""
+    if not xs:
+        return None
+    n = len(xs)
+    mean = sum(xs) / n
+    sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / (n - 1)) if n > 1 else 0.0
+    return n, mean, sd, sorted(xs)[n // 2]
+
+
+def day_ms(s, end_of_day=False):
+    d = dt.datetime.fromisoformat(s)
+    if end_of_day and len(s) <= 10:
+        d += dt.timedelta(days=1)
+    return int(d.timestamp() * 1000)
+
+
+def fmt_day(ms):
+    return dt.datetime.fromtimestamp(ms / 1000).strftime("%b %-d, %Y")
+
+
+def histogram(values, width, count):
+    bins = [0] * count
+    for v in values:
+        bins[min(count - 1, int(v / width))] += 1
+    top = max(bins) or 1
+    for i, c in enumerate(bins):
+        print(f"  {i * width:4.2f}-{(i + 1) * width:4.2f} | {'█' * round(40 * c / top):<40} {c}")
+
+
+def window_summary(rows, days):
+    """rows: (created_ms, period, complexity, leverage, tokens). days: window length actually covered."""
+    cx = describe([r[2] for r in rows])
+    lev = describe([r[3] for r in rows if r[3] is not None])
+    tok = [r[4] for r in rows]
+    per30 = 30 / days if days else 0
+    return {
+        "n": len(rows), "days": days, "sessions_30d": len(rows) * per30,
+        "cx": cx, "lev": lev,
+        "tokens": sum(tok), "tokens_30d": sum(tok) * per30,
+        "tok_mean": sum(tok) / len(tok) if tok else 0, "tok_median": sorted(tok)[len(tok) // 2] if tok else 0,
+    }
+
+
+def print_change(rows, end_ms, recent_days, baseline_days):
+    data_start = rows[0][0]
+    recent_lo = max(end_ms - recent_days * DAY_MS, data_start)
+    base_hi = recent_lo
+    base_lo = max(base_hi - baseline_days * DAY_MS, data_start)
+    recent = [r for r in rows if recent_lo <= r[0] < end_ms]
+    base = [r for r in rows if base_lo <= r[0] < base_hi]
+    r_days, b_days = (end_ms - recent_lo) / DAY_MS, (base_hi - base_lo) / DAY_MS
+    note = lambda got, want: "" if got >= want - 0.5 else f"; all the history there is, {want} requested"  # noqa: E731
+    print(f"\nCHANGE — last {recent_days} days vs the {baseline_days} days before:")
+    print(f"  recent:   {fmt_day(recent_lo)} – {fmt_day(end_ms - 1)} ({r_days:.0f} days{note(r_days, recent_days)})")
+    if not base:
+        print("  baseline: none — there is no history before the recent window yet, so there's nothing to compare against")
+        return
+    print(f"  baseline: {fmt_day(base_lo)} – {fmt_day(base_hi - 1)} ({b_days:.0f} days{note(b_days, baseline_days)})\n")
+    R, B = window_summary(recent, r_days), window_summary(base, b_days)
+    lines = [("sessions", f"{R['n']}", f"{B['n']}", "")]
+    lines.append(("sessions per 30 days", f"{R['sessions_30d']:.0f}", f"{B['sessions_30d']:.0f}", pct_change(R["sessions_30d"], B["sessions_30d"])))
+    if R["cx"] and B["cx"]:
+        (_, rm, _, rmed), (_, bm, bsd, bmed) = R["cx"], B["cx"]
+        sd_units = f", {(rm - bm) / bsd:+.2f} sd" if bsd else ""
+        lines.append(("complexity mean", f"{rm:.2f}", f"{bm:.2f}", f"{rm - bm:+.2f} ({pct_change(rm, bm)}{sd_units})"))
+        lines.append(("complexity median", f"{rmed:.2f}", f"{bmed:.2f}", f"{rmed - bmed:+.2f}"))
+    if R["lev"] and B["lev"]:
+        lines.append(("leverage mean", f"{R['lev'][1]:.2f}", f"{B['lev'][1]:.2f}", f"{R['lev'][1] - B['lev'][1]:+.2f}"))
+    lines.append(("tokens per 30 days", human_tokens(R["tokens_30d"]), human_tokens(B["tokens_30d"]), pct_change(R["tokens_30d"], B["tokens_30d"])))
+    lines.append(("tokens per session, mean", human_tokens(R["tok_mean"]), human_tokens(B["tok_mean"]), pct_change(R["tok_mean"], B["tok_mean"])))
+    lines.append(("tokens per session, median", human_tokens(R["tok_median"]), human_tokens(B["tok_median"]), pct_change(R["tok_median"], B["tok_median"])))
+    print(f"  {'':28}{'recent':>10}{'baseline':>11}   change")
+    for label, r, b, c in lines:
+        print(f"  {label:28}{r:>10}{b:>11}   {c}")
+
+
 def cmd_report(args):
     db = sqlite3.connect(str(pathlib.Path(args.db).expanduser()))
+    since_ms = day_ms(args.since) if args.since else None
+    until_ms = day_ms(args.until, end_of_day=True) if args.until else None
+    win, params = "", []
+    if since_ms is not None:
+        win, params = win + " AND created_ms >= ?", params + [since_ms]
+    if until_ms is not None:
+        win, params = win + " AND created_ms < ?", params + [until_ms]
+
     if args.all:
         table = "sessions WHERE status='scored'"
         print("\nAll scored sessions (--all; includes tests, scripted jobs, and forks)")
     else:
         # Personal sessions are the ones the trend tracks; show the funnel from
         # everything scored down to them.
-        total, unscored = db.execute("SELECT COUNT(*), SUM(status != 'scored') FROM sessions").fetchone()
-        non_personal = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND origin IS NOT 'personal_work'").fetchone()[0]
-        forks = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND fork_of IS NOT NULL").fetchone()[0]
-        launcher = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND launched_by_program = 1").fetchone()[0]
-        personal = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND origin='personal_work' AND fork_of IS NULL AND launched_by_program = 0").fetchone()[0]
+        q = lambda cond: db.execute(f"SELECT COUNT(*) FROM sessions WHERE {cond}{win}", params).fetchone()[0]  # noqa: E731
+        total, unscored = q("1=1"), q("status != 'scored'")
+        non_personal = q("status='scored' AND origin IS NOT 'personal_work'")
+        forks = q("status='scored' AND fork_of IS NOT NULL")
+        launcher = q("status='scored' AND launched_by_program = 1")
+        personal = q("status='scored' AND origin='personal_work' AND fork_of IS NULL AND launched_by_program = 0")
         print("\nPERSONAL SESSIONS — scored, personal work, not forks, launched by a human:")
         print(f"  {total} sessions -> {personal} analyzed below "
               f"(excluded: {unscored} unscored, {non_personal} scripted/test/benchmark, "
               f"{forks} forks, {launcher} launcher-created; categories may overlap)")
         table = "human_sessions WHERE 1=1"
     period = {"month": "month", "week": "week", "day": "day"}[args.by]
-    rows = db.execute(f"SELECT {period}, complexity FROM {table} ORDER BY created_ms").fetchall()
+    rows = db.execute(f"SELECT created_ms, {period}, complexity, leverage, COALESCE(tokens_total, 0) FROM {table}{win} ORDER BY created_ms", params).fetchall()
     if not rows:
-        print("no scored sessions")
+        print("no scored sessions in this period")
         return
-    values = [r[1] for r in rows]
+    first, last = rows[0][0], rows[-1][0]
+    label = "all time" if not (args.since or args.until) else f"{args.since or 'start'} to {args.until or 'now'}"
+    print(f"  period: {label} ({fmt_day(first)} – {fmt_day(last)})")
 
-    def stats(xs):
-        n = len(xs)
-        mean = sum(xs) / n
-        sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / (n - 1)) if n > 1 else 0.0
-        med = sorted(xs)[n // 2]
-        return n, mean, sd, med
+    end_ms = until_ms if until_ms is not None else int(time.time() * 1000)
+    print_change(rows, end_ms, args.recent_days, args.baseline_days)
 
-    n, mean, sd, med = stats(values)
+    n, mean, sd, med = describe([r[2] for r in rows])
     print(f"\nComplexity: n={n} mean={mean:.2f} sd={sd:.2f} median={med:.2f}")
     print("levels: 0 minutes · 1 <1h · 2 few hours · 3 a day · 4 several days · 5 weeks · 6 months for a team\n")
-    bins = [0] * 24
-    for v in values:
-        bins[min(23, int(v / 0.25))] += 1
-    top = max(bins)
-    for i, c in enumerate(bins):
-        print(f"  {i * 0.25:4.2f}-{(i + 1) * 0.25:4.2f} | {'█' * round(40 * c / top):<40} {c}")
-    lev = [r[0] for r in db.execute(f"SELECT leverage FROM {table.replace('WHERE 1=1', 'WHERE leverage IS NOT NULL') if 'WHERE 1=1' in table else table + ' AND leverage IS NOT NULL'}")]
+    histogram([r[2] for r in rows], 0.25, 24)
+
+    lev = [r[3] for r in rows if r[3] is not None]
     if lev:
-        ln = len(lev)
-        print(f"\nLeverage: n={ln} mean={sum(lev) / ln:.2f}")
+        print(f"\nLeverage: n={len(lev)} mean={sum(lev) / len(lev):.2f}")
         print("levels: 0 answered from knowledge · 1 a lookup or two · 2 steered step by step · 3 delegated a goal · 4 orchestrated agents · 5 autonomous loop\n")
-        lbins = [0] * 10
-        for v in lev:
-            lbins[min(9, int(v * 2))] += 1
-        ltop = max(lbins)
-        for i, c in enumerate(lbins):
-            print(f"  {i * 0.5:3.1f}-{(i + 1) * 0.5:3.1f} | {'█' * round(40 * c / ltop):<40} {c}")
+        histogram(lev, 0.5, 10)
+
+    tok = [r[4] for r in rows]
+    span_days = max(1.0, (end_ms - first) / DAY_MS)
+    print(f"\nTokens (including subagents): total {human_tokens(sum(tok))} · per 30 days {human_tokens(sum(tok) * 30 / span_days)}"
+          f" · per session mean {human_tokens(sum(tok) / len(tok))}, median {human_tokens(sorted(tok)[len(tok) // 2])}")
+
     print(f"\nBy {args.by}:")
     groups = {}
-    for p, v in rows:
-        groups.setdefault(p, []).append(v)
-    for p, xs in groups.items():
-        n, mean, sd, med = stats(xs)
-        print(f"  {p}  n={n:4d}  mean={mean:.2f}  sd={sd:.2f}  median={med:.2f}  {'▇' * round(mean * 8)}")
+    for r in rows:
+        groups.setdefault(r[1], []).append(r)
+    for p, rs in groups.items():
+        n, mean, sd, med = describe([r[2] for r in rs])
+        print(f"  {p}  n={n:4d}  complexity mean={mean:.2f} sd={sd:.2f} median={med:.2f}  tokens={human_tokens(sum(r[4] for r in rs)):>7}  {'▇' * round(mean * 8)}")
 
 
 def main():
@@ -833,10 +927,14 @@ def main():
     m = sub.add_parser("merge", help="merge databases from several machines into one")
     m.add_argument("inputs", nargs="+")
     m.add_argument("-o", "--output", required=True)
-    r = sub.add_parser("report", help="print the distribution and its trend")
+    r = sub.add_parser("report", help="print the distribution, its trend, and the recent change")
     r.add_argument("--db", default=str(DEFAULT_DB))
     r.add_argument("--by", choices=["month", "week", "day"], default="month")
     r.add_argument("--all", action="store_true", help="include tests, scripted jobs, and forks")
+    r.add_argument("--since", help="only sessions created on or after this date, YYYY-MM-DD (default: all history)")
+    r.add_argument("--until", help="only sessions created on or before this date, YYYY-MM-DD (default: now); also ends the recent window")
+    r.add_argument("--recent-days", type=int, default=30, help="length of the recent window compared against the baseline (default 30)")
+    r.add_argument("--baseline-days", type=int, default=180, help="length of the baseline window just before the recent one (default 180)")
     argv = sys.argv[1:]
     if not argv or argv[0] not in ("score", "merge", "report", "-h", "--help"):
         argv = ["score"] + argv

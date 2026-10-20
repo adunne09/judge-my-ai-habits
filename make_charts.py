@@ -124,7 +124,7 @@ def trend_chart(rows):
 
 def default_db():
     data = pathlib.Path.home() / ".local" / "share"
-    new, legacy = data / "judge-my-agent-habits" / "sessions.sqlite", data / "opencode-session-complexity" / "sessions.sqlite"
+    new, legacy = data / "judge-my-ai-habits" / "sessions.sqlite", data / "opencode-session-complexity" / "sessions.sqlite"
     return str(legacy if legacy.exists() and not new.exists() else new)
 
 

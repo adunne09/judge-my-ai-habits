@@ -42,7 +42,7 @@ def spearman(a, b):
 
 def main():
     home = pathlib.Path.home() / ".local" / "share"
-    new, legacy = home / "judge-my-agent-habits" / "sessions.sqlite", home / "opencode-session-complexity" / "sessions.sqlite"
+    new, legacy = home / "judge-my-ai-habits" / "sessions.sqlite", home / "opencode-session-complexity" / "sessions.sqlite"
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", required=True)
     ap.add_argument("--field", choices=["complexity", "leverage"], default="complexity")

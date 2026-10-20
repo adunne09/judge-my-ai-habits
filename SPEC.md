@@ -1,4 +1,4 @@
-# judge-my-agent-habits: specification
+# judge-my-ai-habits: specification
 
 This document defines the method precisely enough to reimplement it for any agent
 harness: Claude Code, Claude Desktop, Codex, Cursor, a custom agent loop, and so
@@ -35,7 +35,9 @@ For each machine and harness:
 4. **Build the state** (section 5) and compute deterministic metrics.
 5. **Ask Jev** all questions in one request (section 6).
 6. **Upsert one row** per session into SQLite (section 7).
-7. **Report** on personal sessions only; merge databases across machines and harnesses.
+7. **Report** on personal sessions only: the distributions over the chosen
+   period, and the change in the last 30 days against the 180 before (section 7).
+   Merge databases across machines and harnesses.
 
 The harness-specific part is steps 1 and 3: the **adapter**. Everything else is
 shared and must behave identically.
@@ -253,6 +255,25 @@ Key facts:
 - `runs`: one row per scoring run.
 - New columns are added with `ALTER TABLE … ADD COLUMN` on open. `merge` copies
   only the columns an input has, so older databases still merge.
+
+### Report
+
+Reports cover `human_sessions` (or every scored session with `--all`) over all
+history by default, optionally limited with `--since`/`--until`. They always
+include the **change** between two trailing windows ending at `--until` or now:
+
+- **Recent**: the last `recent_days` (default 30) days.
+- **Baseline**: the `baseline_days` (default 180) days **immediately before**
+  the recent window. They don't overlap.
+- Both windows are clipped to the first session in range. With less history than
+  requested, the baseline is all the history before the recent window. With less
+  than one recent window of history, the recent window is all of it and there is
+  no baseline, which the report says instead of showing a change.
+- Compared per window: session count and sessions per 30 days; complexity mean
+  (as a difference, a percentage, and in baseline standard deviations) and
+  median; leverage mean; `tokens_total` per 30 days; and mean and median tokens
+  per session. Rates use each window's actual covered length, so windows of
+  different lengths compare fairly.
 
 ## 8. Validating a new harness
 

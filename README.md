@@ -1,4 +1,4 @@
-# judge-my-agent-habits
+# judge-my-ai-habits
 
 A bell curve for AI-assisted work. Every session in which you worked with an AI
 agent gets two scores. **Complexity** is how much work it would take a skilled
@@ -50,6 +50,9 @@ says a lot.
   everything automatically, and every harness shares the same questions.
 - **Mergeable.** Each machine writes its own SQLite database. Databases from
   different machines and harnesses merge into one.
+- **Shows the change.** By default the report compares your last 30 days with
+  the 180 days before, for session complexity and token usage, so you can see
+  whether the curve is moving.
 
 The method is written up as a harness-independent [specification](SPEC.md), so it
 can be reimplemented for any agent client.
@@ -84,12 +87,49 @@ Linux, a supported harness, and a TypeSafe API key.
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
 ./session-complexity                   # score new or changed sessions on this machine
-./session-complexity report            # histogram plus a monthly trend
+./session-complexity report            # recent change, histograms, tokens, and a monthly trend
 ./session-complexity report --by week
 python3 make_charts.py                 # regenerate the SVG charts in this README from the DB
 ```
 
-Results go to `~/.local/share/judge-my-agent-habits/sessions.sqlite`. Change that
+`report` covers personal sessions over **all of your history** by default. It
+opens with the **change**: your last 30 days compared with the 180 days before
+them, for session complexity, leverage, and token usage. Windows of different
+lengths are compared fairly, as rates per 30 days and as per-session figures. If
+you have less than six months of history, the baseline is all the history before
+the recent window. If you have less than a month, the recent window is all the
+history there is, and there's no baseline yet. Example:
+
+```text
+CHANGE — last 30 days vs the 180 days before:
+  recent:   Sep 20, 2026 – Oct 20, 2026 (30 days)
+  baseline: Aug 3, 2026 – Sep 19, 2026 (48 days; all the history there is, 180 requested)
+
+                                  recent   baseline   change
+  sessions                           248        253
+  sessions per 30 days               248        157   +57.5%
+  complexity mean                   1.84       1.77   +0.08 (+4.3%, +0.08 sd)
+  complexity median                 1.80       1.76   +0.04
+  leverage mean                     2.47       2.45   +0.02
+  tokens per 30 days               1.51B    566.47M   +165.7%
+  tokens per session, mean         6.07M      3.60M   +68.7%
+  tokens per session, median     602.02K    578.00K   +4.2%
+```
+
+The complexity change is also given in standard deviations of the baseline
+(`sd`), which is the natural unit for "how far has the bell curve moved". Token
+counts include subagents.
+
+| `report` flag | Effect |
+| --- | --- |
+| `--since 2026-06-01`, `--until 2026-09-30` | Limit everything to a date range. `--until` also ends the recent window (default: now) |
+| `--recent-days 30` | Length of the recent window |
+| `--baseline-days 180` | Length of the baseline window just before it |
+| `--by month\|week\|day` | Grouping for the trend table |
+| `--all` | Include tests, scripted jobs, and forks |
+| `--db PATH` | Read a different database, for example a merged one |
+
+Results go to `~/.local/share/judge-my-ai-habits/sessions.sqlite`. Change that
 with `--db`. (A database at the older `opencode-session-complexity` location
 keeps being used if it exists.) Each row is keyed by `(machine, session_id)` and
 records its `harness`. `machine` is the short hostname; override it with
@@ -100,7 +140,7 @@ last score, if its last attempt failed, or if the questions changed. A full firs
 run on about 1,260 sessions took about a minute and used 3.4M Jev input tokens,
 about $0.14.
 
-Other options:
+Other `score` options:
 
 | Flag | Effect |
 | --- | --- |
@@ -120,8 +160,8 @@ databases to one place and merge them:
 
 ```sh
 mkdir -p data
-scp laptop:.local/share/judge-my-agent-habits/sessions.sqlite data/laptop.sqlite
-scp desktop:.local/share/judge-my-agent-habits/sessions.sqlite data/desktop.sqlite
+scp laptop:.local/share/judge-my-ai-habits/sessions.sqlite data/laptop.sqlite
+scp desktop:.local/share/judge-my-ai-habits/sessions.sqlite data/desktop.sqlite
 ./session-complexity merge data/*.sqlite -o all.sqlite
 ./session-complexity report --db all.sqlite
 ```
@@ -352,8 +392,8 @@ to name it.
 ````text
 Target harness: Claude Desktop
 
-Add support for the target harness above to judge-my-agent-habits
-(https://github.com/adunne09/judge-my-agent-habits). The tool scores AI agent
+Add support for the target harness above to judge-my-ai-habits
+(https://github.com/adunne09/judge-my-ai-habits). The tool scores AI agent
 sessions for complexity (0–6) and leverage (0–5) with TypeSafe's Jev and stores
 the results in mergeable SQLite. OpenCode v2 is supported today. Your goal:
 `./session-complexity score --harness <id>` works for the target harness, and its
@@ -407,9 +447,9 @@ me for it. Before scoring at scale:
      halves are fine) and leverage (0–5) from the states alone, before you see
      any Jev output. Save these as labels-dev.json. Label 20 more the same way
      as a blind holdout in labels-holdout.json, and don't look at their scores yet.
-  b. Score the dev set into a scratch database (`--db /tmp/jmah-dev.sqlite`,
+  b. Score the dev set into a scratch database (`--db /tmp/jmaih-dev.sqlite`,
      repeating `--session`), then run
-     `python3 validation/agreement.py --db /tmp/jmah-dev.sqlite --labels labels-dev.json`,
+     `python3 validation/agreement.py --db /tmp/jmaih-dev.sqlite --labels labels-dev.json`,
      once as is and once with `--field leverage`.
   c. Read the biggest disagreements. For each one, decide whether the state
      misrepresented the session (an adapter problem) or your label was wrong.
