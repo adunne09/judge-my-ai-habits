@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-SCORER_VERSION = "1"
+SCORER_VERSION = "2"
 DEFAULT_MODEL = "jev-1.13.0"
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 HOME = str(pathlib.Path.home())
@@ -39,12 +39,12 @@ DEFAULT_DB = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / 
 # Jev questions. Changing any of these changes SCORER_HASH, which rescores sessions.
 # ---------------------------------------------------------------------------
 
-EVIDENCE = "Judge from `user_messages` (what was asked) and `agent_actions` (the work that was actually needed to do it)."
+EVIDENCE = "Judge from `user_messages` (what was asked), `agent_actions` (the work that was actually needed to do it), and `work_pattern`."
 
 COMPLEXITY = {
     "type": "score",
     "instructions": {
-        "question": "How much work would it take a skilled professional, working without AI, to do everything the user asked for in this session?",
+        "question": "How much work would it take skilled professionals, working without AI, to do everything the user asked for in this session?",
         "evidence": EVIDENCE,
         "focus": "Judge the size of the work requested, not the length of the conversation or how well the agent did.",
     },
@@ -54,7 +54,27 @@ COMPLEXITY = {
         {"what": "A few hours: a multi-step task", "examples": ["diagnosing and fixing a bug", "researching a question across several sources", "reviewing a set of documents and proposing edits", "coordinating a change across a few tools"]},
         {"what": "About a full day: a substantial piece of work", "examples": ["building a working feature or small tool end to end", "a thorough research report with recommendations", "migrating content or data between systems", "a multi-step workflow across several services"]},
         {"what": "Several days: a multi-part project", "examples": ["building a new tool or service with several components", "a research and writing project producing several deliverables", "a migration across several systems with testing and fixes"]},
-        {"what": "Weeks: a large project", "examples": ["building and launching a complete application with many features and revisions", "an ongoing program of work spanning many systems, people, and deliverables"]},
+        {"what": "Weeks: a large project for one person", "examples": ["building and launching a complete application with many features and revisions", "an ongoing program of work spanning many systems, people, and deliverables"]},
+        {"what": "Months of work for a team of specialists", "examples": ["migrating a large production web app to a different framework through hundreds of pull requests", "porting a compiler or similarly large system to another programming language", "computationally designing hundreds of candidate proteins and sending them for lab testing"]},
+    ],
+}
+
+# How the work was delegated, anchored on frontier practice (multi-agent
+# orchestration, long-running autonomous loops). Independent of size.
+LEVERAGE = {
+    "type": "score",
+    "instructions": {
+        "question": "How did the user put AI to work in this session?",
+        "evidence": EVIDENCE,
+        "focus": "Judge the way the work was delegated and organized, not how big the work was.",
+    },
+    "criteria": [
+        "Asked a question that the model answered from its own knowledge, without taking any actions",
+        "Had the agent run one or two lookups or commands on the user's behalf",
+        "Steered the agent step by step: the user directed each stage and the agent carried it out between messages",
+        "Delegated a goal: the agent planned, carried out, and checked a multi-step task with little steering",
+        "Orchestrated several AI agents: the work was split across subagents, parallel sessions, git worktrees, or other AI tools coordinated toward one goal",
+        "Ran an autonomous agent system: a long-running or recurring loop in which agents plan, implement, review, and verify work over many hours or days with only occasional check-ins from the user",
     ],
 }
 
@@ -114,7 +134,7 @@ ORIGIN = {
     },
 }
 
-QUESTIONS = {"complexity": COMPLEXITY, **DIMENSIONS, "origin": ORIGIN}
+QUESTIONS = {"complexity": COMPLEXITY, "leverage": LEVERAGE, **DIMENSIONS, "origin": ORIGIN}
 
 # State size limits. Measured: a full state is ~1k-7k tokens, far below Jev's 32k per-question limit.
 TRACE_CAP = 80
@@ -276,12 +296,50 @@ def cap_user_messages(users):
     return [first] + front + gap + back + [last]
 
 
+IDLE_CAP_MS = 30 * 60 * 1000  # gaps longer than this are idle time, not agent work
+
+# Other AI CLIs an agent might shell out to, evidence for the orchestration
+# levels of the `leverage` question.
+AI_TOOLS = re.compile(r"(?:^|[\s;&|/(])(codex|claude|gemini|cursor-agent|aider|amp|opencode run|aside|goose|droid)\b")
+
+
+def human_duration(seconds):
+    if seconds < 90:
+        return "under 2 minutes"
+    if seconds < 3600:
+        return f"about {round(seconds / 60)} minutes"
+    if seconds < 86400:
+        return f"about {round(seconds / 3600, 1):g} hours"
+    return f"about {round(seconds / 86400, 1):g} days"
+
+
+def active_time(messages):
+    """Sum of time between consecutive messages within each user turn.
+
+    A turn starts at a user message and runs to the last activity before the
+    next one. Each gap is capped at IDLE_CAP_MS so a session left open for
+    days doesn't count as agent work.
+    """
+    active_ms, prev_ms, in_turn = 0.0, None, False
+    for m in messages:
+        created = (m.get("time") or {}).get("created")
+        if not created:
+            continue
+        if m.get("type") == "user":
+            in_turn, prev_ms = True, created
+            continue
+        if in_turn and prev_ms is not None:
+            active_ms += min(max(0, created - prev_ms), IDLE_CAP_MS)
+        prev_ms = created
+    return active_ms
+
+
 def analyze(session, messages):
-    """Return (state for Jev, deterministic metrics)."""
+    """Return (state for Jev, deterministic metrics, other AI CLIs invoked from shell)."""
     users, trace, tools, files = [], [], [], set()
-    final_reply, assistant_count, active_ms = "", 0, 0.0
+    final_reply, assistant_count = "", 0
     first_ms, last_ms = None, None
-    models = set()
+    models, other_ai = set(), []
     for m in messages:
         t = m.get("type")
         created = (m.get("time") or {}).get("created")
@@ -302,9 +360,6 @@ def analyze(session, messages):
             users.append(entry)
         elif t == "assistant":
             assistant_count += 1
-            mt = m.get("time") or {}
-            if mt.get("completed") and mt.get("created"):
-                active_ms += max(0, mt["completed"] - mt["created"])
             model = m.get("model") or {}
             if model.get("id"):
                 models.add(f"{model.get('providerID', '?')}/{model['id']}")
@@ -316,6 +371,11 @@ def analyze(session, messages):
                         inp = (part.get("state") or {}).get("input") or {}
                         if isinstance(inp, dict) and (inp.get("path") or inp.get("filePath")):
                             files.add(inp.get("path") or inp.get("filePath"))
+                    if part.get("name") in ("shell", "bash"):
+                        cmd = ((part.get("state") or {}).get("input") or {}).get("command", "")
+                        for m2 in AI_TOOLS.findall(cmd or ""):
+                            if m2 not in other_ai:
+                                other_ai.append(m2)
                 elif part.get("type") == "text" and (part.get("text") or "").strip():
                     final_reply = part["text"]
         elif t == "shell":
@@ -334,11 +394,18 @@ def analyze(session, messages):
         "distinct_tools": len(set(tools)),
         "subagent_calls": sum(1 for x in tools if x in ("subagent", "task")),
         "files_edited": len(files),
-        "active_seconds": round(active_ms / 1000, 1),
+        "active_seconds": round(active_time(messages) / 1000, 1),
         "wall_seconds": round((last_ms - first_ms) / 1000, 1) if first_ms and last_ms else 0,
         "models_used": ",".join(sorted(models)),
     }
-    return state, metrics
+    state["work_pattern"] = {
+        "user_messages": len(users),
+        "agent_steps_per_user_message": round(len(tools) / max(1, len(users))),
+        "agent_working_time": human_duration(metrics["active_seconds"]),
+        "subagents_launched": sum(1 for x in tools if x in ("subagent", "task")),
+        "other_ai_agents_run_from_shell": other_ai or "none",
+    }
+    return state, metrics, other_ai
 
 
 # ---------------------------------------------------------------------------
@@ -424,10 +491,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   origin_p_personal REAL,
   origin_p_scripted REAL,
   origin_p_test REAL,
-  complexity REAL,            -- 0..5, see README for the levels
+  complexity REAL,            -- 0..6, see README for the levels
   complexity_confidence REAL,
   complexity_p0 REAL, complexity_p1 REAL, complexity_p2 REAL,
-  complexity_p3 REAL, complexity_p4 REAL, complexity_p5 REAL,
+  complexity_p3 REAL, complexity_p4 REAL, complexity_p5 REAL, complexity_p6 REAL,
+  leverage REAL,              -- 0..5, how the work was delegated (see README)
   scope REAL,                 -- 0..3
   expertise REAL,             -- 0..3
   systems REAL,               -- 0..3
@@ -459,7 +527,8 @@ COLUMNS = [
     "tokens_input", "tokens_output", "tokens_reasoning", "tokens_cache_read", "tokens_cache_write", "tokens_total", "cost_usd",
     "status", "error", "origin", "origin_p_personal", "origin_p_scripted", "origin_p_test",
     "complexity", "complexity_confidence",
-    "complexity_p0", "complexity_p1", "complexity_p2", "complexity_p3", "complexity_p4", "complexity_p5",
+    "complexity_p0", "complexity_p1", "complexity_p2", "complexity_p3", "complexity_p4", "complexity_p5", "complexity_p6",
+    "leverage",
     "scope", "expertise", "systems", "open_endedness", "answers_json",
     "jev_model", "scorer_hash", "state_tokens", "scored_at", "opencode_version",
 ]
@@ -469,6 +538,11 @@ def connect(path: pathlib.Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(path), check_same_thread=False)
     db.executescript(SCHEMA)
+    # migrate databases created before these columns existed
+    have = {r[1] for r in db.execute("PRAGMA table_info(sessions)")}
+    for col, decl in (("complexity_p6", "REAL"), ("leverage", "REAL")):
+        if col not in have:
+            db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
     return db
 
 
@@ -532,11 +606,13 @@ def score_one(oc, jev, machine, session, children, opencode_version):
     row = base_row(machine, session, children, opencode_version)
     row["scorer_hash"], row["scored_at"] = SCORER_HASH, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     try:
-        state, metrics = analyze(session, oc.messages(session["id"]))
+        state, metrics, other_ai = analyze(session, oc.messages(session["id"]))
         row.update(metrics)
         if metrics["user_messages"] == 0 or metrics["assistant_messages"] == 0:
             row["status"] = "empty"
             return row, 0
+        # child sessions are the authoritative count of subagents launched
+        state["work_pattern"]["subagents_launched"] = max(len(children), state["work_pattern"]["subagents_launched"])
         resp = jev.ask(state, QUESTIONS)
         a = resp["answers"]
         cx = a["complexity"]
@@ -546,7 +622,8 @@ def score_one(oc, jev, machine, session, children, opencode_version):
             "status": "scored",
             "complexity": cx["score"],
             "complexity_confidence": cx["confidence"],
-            **{f"complexity_p{i}": probs.get(i) for i in range(6)},
+            **{f"complexity_p{i}": probs.get(i) for i in range(7)},
+            "leverage": a["leverage"]["score"],
             **{k: a[k]["score"] for k in DIMENSIONS},
             "origin": a["origin"]["choice"],
             "origin_p_personal": org.get("personal_work"),
@@ -606,7 +683,7 @@ def cmd_score(args):
 
     if args.dry_run:
         for s in todo[: args.limit or 3]:
-            state, metrics = analyze(s, oc.messages(s["id"]))
+            state, metrics, _ = analyze(s, oc.messages(s["id"]))
             print(json.dumps({"session_id": s["id"], "metrics": metrics, "state": state}, indent=2, ensure_ascii=False))
         return
 
@@ -672,13 +749,24 @@ def cmd_report(args):
 
     n, mean, sd, med = stats(values)
     print(f"\nComplexity of {'all scored' if args.all else 'personal (non-test, non-fork)'} sessions: n={n} mean={mean:.2f} sd={sd:.2f} median={med:.2f}")
-    print("levels: 0 minutes · 1 <1h · 2 few hours · 3 a day · 4 several days · 5 weeks\n")
-    bins = [0] * 20
+    print("levels: 0 minutes · 1 <1h · 2 few hours · 3 a day · 4 several days · 5 weeks · 6 months for a team\n")
+    bins = [0] * 24
     for v in values:
-        bins[min(19, int(v / 0.25))] += 1
+        bins[min(23, int(v / 0.25))] += 1
     top = max(bins)
     for i, c in enumerate(bins):
         print(f"  {i * 0.25:4.2f}-{(i + 1) * 0.25:4.2f} | {'█' * round(40 * c / top):<40} {c}")
+    lev = [r[0] for r in db.execute(f"SELECT leverage FROM {table.replace('WHERE 1=1', 'WHERE leverage IS NOT NULL') if 'WHERE 1=1' in table else table + ' AND leverage IS NOT NULL'}")]
+    if lev:
+        ln = len(lev)
+        print(f"\nLeverage (how the work was delegated): n={ln} mean={sum(lev) / ln:.2f}")
+        print("levels: 0 answered from knowledge · 1 a lookup or two · 2 steered step by step · 3 delegated a goal · 4 orchestrated agents · 5 autonomous loop\n")
+        lbins = [0] * 10
+        for v in lev:
+            lbins[min(9, int(v * 2))] += 1
+        ltop = max(lbins)
+        for i, c in enumerate(lbins):
+            print(f"  {i * 0.5:3.1f}-{(i + 1) * 0.5:3.1f} | {'█' * round(40 * c / ltop):<40} {c}")
     print(f"\nBy {args.by}:")
     groups = {}
     for p, v in rows:

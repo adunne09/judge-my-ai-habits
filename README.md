@@ -25,8 +25,8 @@ short hostname; override it with `--machine`.
 
 Runs are incremental. A session is only sent to Jev again if it changed since its
 last score, if its last attempt failed, or if the questions changed. A full first
-run on about 1,260 sessions took about a minute and used 2.8M Jev input
-tokens, about $0.12.
+run on about 1,260 sessions took about a minute and used 3.4M Jev input tokens,
+about $0.14.
 
 Other options:
 
@@ -81,6 +81,11 @@ parent's actions. The request state contains:
   Repeats are collapsed. The list is capped at 80 entries, sampled evenly from
   the middle when longer.
 - `agent_final_reply`: the agent's last reply, capped at 1,800 characters.
+- `work_pattern`: plain-language facts about how the session ran, computed in
+  code: how many messages the user sent, how many agent steps per message, how
+  long the agent actively worked (gaps over 30 minutes count as idle, not work),
+  how many subagents were launched, and which other AI CLIs (`codex`, `claude`,
+  `gemini`, `amp`, …) the agent ran from the shell.
 
 Tool outputs, reasoning, and file contents are left out. A typical state is 1k to
 7k tokens.
@@ -90,11 +95,11 @@ aren't sent to Jev.
 
 ### Questions
 
-All six questions go in the same request, so they're answered in parallel over the
-same state.
+All seven questions go in the same request, so they're answered in parallel over
+the same state.
 
-**`complexity` (0 to 5)** is the headline number. It's a Score question: "How much
-work would it take a skilled professional, working without AI, to do everything the
+**`complexity` (0 to 6)** is the headline number. It's a Score question: "How much
+work would it take skilled professionals, working without AI, to do everything the
 user asked for in this session?" The levels are:
 
 | Level | Meaning |
@@ -104,11 +109,32 @@ user asked for in this session?" The levels are:
 | 2 | A few hours: a multi-step task |
 | 3 | About a full day: a substantial piece of work |
 | 4 | Several days: a multi-part project |
-| 5 | Weeks: a large project |
+| 5 | Weeks: a large project for one person |
+| 6 | Months of work for a team of specialists |
+
+Level 6 is anchored on the most complex real usage people post about publicly
+(frontier practice, found by surveying X/Twitter in October 2026): migrating a
+large production web app to a different framework through hundreds of pull
+requests (a two-week autonomous loop, ~600 PRs); porting a compiler to another
+language; computationally designing hundreds of candidate proteins and sending
+them for lab testing. These are sessions where the user only sets a goal and
+checks in every few days. Ordinary interactive sessions sit far below it.
 
 Each level also carries generic examples. The score is the probability-weighted
 level, so it's continuous, for example 2.37. The probability for each level is
-stored too, in `complexity_p0` through `complexity_p5`.
+stored too, in `complexity_p0` through `complexity_p6`.
+
+**`leverage` (0 to 5)** asks "How did the user put AI to work in this session?"
+It judges the way work was delegated and organized, independent of size:
+
+| Level | Meaning |
+| --- | --- |
+| 0 | Answered from the model's own knowledge, no actions taken |
+| 1 | One or two lookups or commands run on the user's behalf |
+| 2 | Steered step by step, agent acts between messages |
+| 3 | Delegated a goal; the agent planned, carried out, and checked the work |
+| 4 | Orchestrated several AI agents: subagents, worktrees, or other AI tools toward one goal |
+| 5 | Ran an autonomous agent system: agents plan/implement/review/verify over many hours or days with occasional check-ins |
 
 The other four Scores are stored as separate dimensions, each from 0 to 3. They
 aren't folded into `complexity`:
@@ -138,6 +164,7 @@ blind holdout, rated before seeing any Jev output. Spearman rank correlation wit
 | All user messages | 0.94 | 0.93 |
 | User messages, actions, and final reply | 0.96 | 0.97 |
 | Same, with a generic example on each level | 0.96 | 0.96 |
+| v2: 7 levels with a frontier-anchored top, plus `work_pattern` in the state | 0.96 | 0.95 |
 | Weighted mix of scope, ambiguity, expertise, and systems | 0.79 | 0.92 |
 | `jev-preview` (1.14) instead of 1.13 | 0.96 | 0.95 |
 | Tool-call count alone, without Jev | 0.79 | 0.94 |
@@ -157,7 +184,12 @@ Takeaways:
   sessions by about 0.1, which isn't enough to justify the extra tokens.
 - The scale has a sixth level ("weeks") because the largest sessions were pinned
   at the top of a five-level scale. Without it, the right tail of the curve can't
-  move. Rank agreement was unchanged (0.96 on both sets).
+  move. Rank agreement was unchanged (0.96 on both sets). Surveying frontier AI
+  usage posted on X added a seventh level ("months of work for a team"), anchored
+  on autonomous multi-agent campaigns (hundreds of PRs over weeks, compiler ports,
+  protein design runs lab-tested in days). Synthetic sessions modelled on those
+  posts score 5.3–6.0, above any session recorded so far, so the top of the scale
+  has headroom. Rank agreement was unchanged (0.96 dev / 0.95 holdout).
 
 `origin` alone isn't reliable for scripted jobs. In testing it caught all 15
 eval sessions, but it called 9 of 13 launcher-created sessions personal work. That
@@ -188,8 +220,14 @@ FROM human_sessions GROUP BY month, machine ORDER BY month, machine;
 SELECT week, COUNT(*) AS n,
        ROUND(AVG(complexity_p0), 3) AS minutes, ROUND(AVG(complexity_p1), 3) AS under_hour,
        ROUND(AVG(complexity_p2), 3) AS hours,   ROUND(AVG(complexity_p3), 3) AS day,
-       ROUND(AVG(complexity_p4), 3) AS days,    ROUND(AVG(complexity_p5), 3) AS weeks
+       ROUND(AVG(complexity_p4), 3) AS days,    ROUND(AVG(complexity_p5), 3) AS weeks,
+       ROUND(AVG(complexity_p6), 3) AS team_months
 FROM human_sessions GROUP BY week ORDER BY week;
+
+-- Leverage: are you delegating and orchestrating more over time?
+SELECT month, ROUND(AVG(leverage), 2) AS mean_leverage,
+       SUM(leverage >= 3) AS delegated_or_higher, SUM(leverage >= 4) AS multi_agent
+FROM human_sessions GROUP BY month ORDER BY month;
 
 -- Token usage over time (metric 1), including subagents
 SELECT month, SUM(tokens_total) AS tokens, ROUND(SUM(cost_usd), 2) AS cost_usd
