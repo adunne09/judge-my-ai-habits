@@ -732,7 +732,22 @@ def cmd_merge(args):
 
 def cmd_report(args):
     db = sqlite3.connect(str(pathlib.Path(args.db).expanduser()))
-    table = "sessions WHERE status='scored'" if args.all else "human_sessions WHERE 1=1"
+    if args.all:
+        table = "sessions WHERE status='scored'"
+        print("\nAll scored sessions (--all; includes tests, scripted jobs, and forks)")
+    else:
+        # Personal sessions are the ones the trend tracks; show the funnel from
+        # everything scored down to them.
+        total, unscored = db.execute("SELECT COUNT(*), SUM(status != 'scored') FROM sessions").fetchone()
+        non_personal = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND origin IS NOT 'personal_work'").fetchone()[0]
+        forks = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND fork_of IS NOT NULL").fetchone()[0]
+        launcher = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND launched_by_program = 1").fetchone()[0]
+        personal = db.execute("SELECT COUNT(*) FROM sessions WHERE status='scored' AND origin='personal_work' AND fork_of IS NULL AND launched_by_program = 0").fetchone()[0]
+        print("\nPERSONAL SESSIONS — scored, personal work, not forks, launched by a human:")
+        print(f"  {total} sessions -> {personal} analyzed below "
+              f"(excluded: {unscored} unscored, {non_personal} scripted/test/benchmark, "
+              f"{forks} forks, {launcher} launcher-created; categories may overlap)")
+        table = "human_sessions WHERE 1=1"
     period = {"month": "month", "week": "week", "day": "day"}[args.by]
     rows = db.execute(f"SELECT {period}, complexity FROM {table} ORDER BY created_ms").fetchall()
     if not rows:
@@ -748,7 +763,7 @@ def cmd_report(args):
         return n, mean, sd, med
 
     n, mean, sd, med = stats(values)
-    print(f"\nComplexity of {'all scored' if args.all else 'personal (non-test, non-fork)'} sessions: n={n} mean={mean:.2f} sd={sd:.2f} median={med:.2f}")
+    print(f"\nComplexity: n={n} mean={mean:.2f} sd={sd:.2f} median={med:.2f}")
     print("levels: 0 minutes · 1 <1h · 2 few hours · 3 a day · 4 several days · 5 weeks · 6 months for a team\n")
     bins = [0] * 24
     for v in values:
@@ -759,7 +774,7 @@ def cmd_report(args):
     lev = [r[0] for r in db.execute(f"SELECT leverage FROM {table.replace('WHERE 1=1', 'WHERE leverage IS NOT NULL') if 'WHERE 1=1' in table else table + ' AND leverage IS NOT NULL'}")]
     if lev:
         ln = len(lev)
-        print(f"\nLeverage (how the work was delegated): n={ln} mean={sum(lev) / ln:.2f}")
+        print(f"\nLeverage: n={ln} mean={sum(lev) / ln:.2f}")
         print("levels: 0 answered from knowledge · 1 a lookup or two · 2 steered step by step · 3 delegated a goal · 4 orchestrated agents · 5 autonomous loop\n")
         lbins = [0] * 10
         for v in lev:
