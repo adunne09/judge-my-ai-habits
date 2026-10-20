@@ -409,19 +409,17 @@ protocol. A new harness needs only an adapter. The questions, limits, and model
 stay the same, so its scores merge with everyone else's.
 
 The fastest way to add one is to have an agent do it from inside the harness you
-want to support. Copy the prompt below, paste it into that harness (for example
-Claude Desktop, to analyze your Claude Desktop usage), and change the first line
-to name it.
+want to support. Copy the prompt below and paste it into that harness as is; the
+agent already knows which harness it's running in.
 
 ````text
-Target harness: Claude Desktop
-
-Add support for the target harness above to judge-my-ai-habits
+Add support for the harness you're running in right now to judge-my-ai-habits
 (https://github.com/adunne09/judge-my-ai-habits). The tool scores AI agent
 sessions for complexity (0–6) and leverage (0–5) with TypeSafe's Jev and stores
 the results in mergeable SQLite. OpenCode v2 is supported today. Your goal:
-`./session-complexity score --harness <id>` works for the target harness, and its
-scores are comparable with the existing ones.
+`./session-complexity score --harness <id>` works for the current harness, and
+its scores are comparable with the existing ones. If the current harness is
+already supported, tell me and stop.
 
 Ground rules
 - Clone the repo (or open it if it's already local). Read README.md, SPEC.md,
@@ -437,7 +435,7 @@ Ground rules
   must stay identical so the new rows merge with existing ones. If you become
   convinced a question must change, stop and show me the evidence first.
 
-Step 1: Find the data. Work out where and how the target harness stores session
+Step 1: Find the data. Work out where and how the current harness stores session
 history on this machine: local files, a local database, a CLI or API, or an
 official export. Verify this by inspecting real data rather than assuming.
 Report what you found: the location and format, and how sessions, user
