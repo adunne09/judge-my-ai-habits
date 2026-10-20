@@ -2,7 +2,7 @@
 """judge-my-ai-habits: rate every AI agent session on this machine with TypeSafe's Jev.
 
 Reads sessions from a supported agent harness (OpenCode v2 through `opencode api`,
-or Claude Code's transcripts in ~/.claude/projects), asks Jev how much work each
+or Claude Code's and Claude Desktop Cowork's transcripts), asks Jev how much work each
 session represents and how it was delegated, and writes one row per session into a SQLite database that can be
 merged with databases from other machines and other harnesses. See SPEC.md.
 
@@ -211,8 +211,10 @@ def open_opencode():
 
 
 # ---------------------------------------------------------------------------
-# Claude Code access
+# Claude access: Claude Code (CLI, IDE extensions, desktop Code tab) and Claude Desktop's Cowork
 # ---------------------------------------------------------------------------
+
+DESKTOP = pathlib.Path.home() / "Library" / "Application Support" / "Claude"  # Claude Desktop's data (macOS)
 
 # Claude Code tool names -> the shared vocabulary (SPEC.md section 3), and the input
 # fields describe_tool() reads. Anything else falls through under its own name.
@@ -220,11 +222,13 @@ CC_TOOLS = {
     "Bash": "shell", "Read": "read", "Write": "write", "Edit": "edit", "MultiEdit": "multiedit", "NotebookEdit": "edit",
     "Glob": "glob", "Grep": "grep", "Agent": "subagent", "Task": "subagent", "WebFetch": "webfetch", "WebSearch": "websearch",
     "Skill": "skill", "AskUserQuestion": "question", "TodoWrite": "todowrite", "TaskCreate": "todowrite", "TaskUpdate": "todowrite",
-    "mcp__ccd_turn__update_plan": "todowrite",
+    "mcp__ccd_turn__update_plan": "todowrite", "mcp__workspace__bash": "shell", "mcp__workspace__web_fetch": "webfetch",
 }
 # Harness bookkeeping with no counterpart in other harnesses: loading tool schemas,
-# reading back the todo list, and the desktop app's end-of-turn summary card.
-CC_PLUMBING = {"ToolSearch", "TaskList", "TaskGet", "mcp__ccd_turn__wrap_up"}
+# reading back the todo list, the desktop app's end-of-turn summary card, and
+# Cowork's folder-access prompts and file cards.
+CC_PLUMBING = {"ToolSearch", "TaskList", "TaskGet", "mcp__ccd_turn__wrap_up", "mcp__cowork__request_cowork_directory",
+               "mcp__cowork__allow_cowork_file_delete", "mcp__cowork__present_files", "mcp__cowork__send_user_message"}
 # Entrypoints that mean a program started the session: `claude -p` and the Agent SDKs.
 CC_PROGRAM_ENTRYPOINTS = {"sdk-cli", "sdk-ts", "sdk-py"}
 # User-role text that Claude Code injects rather than the person typing it.
@@ -285,22 +289,25 @@ def cc_usage(records):
     return tok
 
 
-class ClaudeCode:
-    """Harness adapter for Claude Code: the CLI, the IDE extensions, and the desktop app's Code tab.
+class Claude:
+    """Harness adapter for Claude: Claude Code and Claude Desktop's Cowork mode, which runs the same engine.
 
-    Reads the JSONL transcripts under ~/.claude/projects (or $CLAUDE_CONFIG_DIR/projects)
-    read-only. Subagent transcripts in <session>/subagents/ become child sessions.
+    Reads Claude Code's JSONL transcripts read-only: ~/.claude/projects (or
+    $CLAUDE_CONFIG_DIR/projects) for the CLI, the IDE extensions, and the desktop
+    app's Code tab, and each Cowork session's own projects folder. Subagent
+    transcripts in <session>/subagents/ become child sessions. Desktop chats are
+    kept in the account, not on disk, so they aren't read.
     """
 
-    name = "claude-code"
+    name = "claude"
 
-    def __init__(self, root: pathlib.Path):
-        self.root = root
+    def __init__(self, root: pathlib.Path, desktop: pathlib.Path = DESKTOP):
+        self.root, self.desktop = root, desktop
         self.paths = {}
-        self.mcp_names = self.desktop_connector_names()
+        self.load_desktop_metadata()
 
     def transcripts(self):
-        return sorted(self.root.glob("projects/*/*.jsonl"))
+        return sorted(self.root.glob("projects/*/*.jsonl")) + sorted(self.desktop.glob("local-agent-mode-sessions/*/*/local_*/.claude/projects/*/*.jsonl"))
 
     def version(self) -> str:
         files = sorted(self.transcripts(), key=lambda p: p.stat().st_mtime)
@@ -309,18 +316,28 @@ class ClaudeCode:
             version = r.get("version") or version
         return f"claude-code {version}" if version else "claude-code"
 
-    @staticmethod
-    def desktop_connector_names():
-        # The desktop app names claude.ai connectors' MCP servers by UUID; its session files map them to names.
-        names = {}
-        for f in pathlib.Path.home().glob("Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json"):
+    def load_desktop_metadata(self):
+        """Read what the desktop app keeps beside the transcripts, one file per Code-tab or Cowork session.
+
+        It names claude.ai connectors' MCP servers by UUID and maps them to names; it
+        holds Cowork's titles; and `cliSessionId` is the transcript the app shows,
+        when a session has several (Cowork starts a new transcript on resume).
+        """
+        self.mcp_names, self.titles, self.folder_titles, self.current = {}, {}, {}, set()
+        for f in list(self.desktop.glob("claude-code-sessions/*/*/local_*.json")) + list(self.desktop.glob("local-agent-mode-sessions/*/*/local_*.json")):
             try:
-                for s in json.loads(f.read_text(encoding="utf-8")).get("remoteMcpServersConfig") or []:
+                meta = json.loads(f.read_text(encoding="utf-8"))
+                for s in meta.get("remoteMcpServersConfig") or []:
                     if s.get("uuid") and s.get("name"):
-                        names[s["uuid"]] = s["name"]
+                        self.mcp_names[s["uuid"]] = s["name"]
             except (OSError, ValueError, AttributeError):
                 continue
-        return names
+            if meta.get("cliSessionId"):
+                self.current.add(meta["cliSessionId"])
+                if meta.get("title"):
+                    self.titles[meta["cliSessionId"]] = meta["title"]
+            if meta.get("title"):
+                self.folder_titles[str(f.with_suffix(""))] = meta["title"]
 
     def tool_name(self, name):
         if name in CC_TOOLS:
@@ -374,7 +391,8 @@ class ClaudeCode:
         session = {
             "id": sid,
             "time": {"created": min(stamps) if stamps else int(path.stat().st_mtime * 1000), "updated": max(stamps) if stamps else None},
-            "title": titles["custom-title"] or titles["ai-title"] or titles["summary"],
+            "title": titles["custom-title"] or titles["ai-title"] or titles["summary"] or self.titles.get(sid)
+            or (self.folder_titles.get(str(path.parents[3])) if len(path.parents) > 3 else None),
             "location": {"directory": next((r.get("cwd") for r in convo if r.get("cwd")), None)},
             "projectID": path.parent.name if parent is None else None,
             "model": {"providerID": "anthropic", "id": max(set(models), key=models.count)} if models else {},
@@ -413,13 +431,17 @@ class ClaudeCode:
             ups = [s["time"]["updated"] for s in [root] + children if s["time"]["updated"]]
             root["time"]["updated"] = max(ups) if ups else None
             out += [root] + children
-        # A forked or branched session copies its parent's history, message uuids included:
-        # the earliest transcript to start with a message is the original, later ones are forks.
-        first_seen = {}
-        for s in sorted((s for s in out if not s.get("parentID") and s["first_uuid"]), key=lambda s: s["time"]["created"]):
-            if s["first_uuid"] in first_seen and "fork" not in s:
-                s["fork"] = {"sessionID": first_seen[s["first_uuid"]]}
-            first_seen.setdefault(s["first_uuid"], s["id"])
+        # Rewinding, branching, or resuming in Cowork copies a session's history, message uuids
+        # included, into a new transcript. Of the transcripts that start with the same message,
+        # the one the desktop app shows is the original, else the earliest; the rest are forks.
+        copies = {}
+        for s in out:
+            if not s.get("parentID") and s["first_uuid"]:
+                copies.setdefault(s["first_uuid"], []).append(s)
+        for group in copies.values():
+            group.sort(key=lambda s: (s["id"] not in self.current, s["time"]["created"]))
+            for s in group[1:]:
+                s.setdefault("fork", {"sessionID": group[0]["id"]})
         return out
 
     def messages(self, session_id: str):
@@ -487,15 +509,16 @@ class ClaudeCode:
         out.append(msg)
 
 
-def open_claude_code():
+def open_claude():
     root = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path.home() / ".claude").expanduser()
-    if not (root / "projects").is_dir():
-        sys.exit(f"error: no Claude Code transcripts found in {root / 'projects'} (set CLAUDE_CONFIG_DIR if they live elsewhere)")
-    return ClaudeCode(root)
+    adapter = Claude(root)
+    if not adapter.transcripts():
+        sys.exit(f"error: no Claude transcripts found in {root / 'projects'} or {DESKTOP} (set CLAUDE_CONFIG_DIR if they live elsewhere)")
+    return adapter
 
 
 # Adapters by --harness id. A new harness adds an entry here; see SPEC.md.
-HARNESSES = {"opencode": open_opencode, "claude-code": open_claude_code}
+HARNESSES = {"opencode": open_opencode, "claude": open_claude}
 
 
 # ---------------------------------------------------------------------------

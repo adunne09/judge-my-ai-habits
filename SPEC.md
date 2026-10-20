@@ -1,7 +1,7 @@
 # judge-my-ai-habits: specification
 
 This document defines the method precisely enough to reimplement it for any agent
-harness: Claude Code, Claude Desktop, Codex, Cursor, a custom agent loop, and so
+harness: Claude, Codex, Cursor, a custom agent loop, and so
 on. The reference implementation is `session-complexity` (one stdlib-only Python
 file). Where this spec and the code disagree, the code is the source of truth;
 fix whichever one is wrong.
@@ -14,7 +14,7 @@ bell curve. Most of this spec exists to protect that property.
 
 | Term | Meaning |
 | --- | --- |
-| Harness | The program that ran the agent: OpenCode, Claude Code, Claude Desktop, Codex, … |
+| Harness | The program that ran the agent: OpenCode, Claude (Claude Code and the desktop app), Codex, … |
 | Session | One conversation thread between a person and an agent in a harness |
 | Top-level session | A session the person started. It is the unit that gets scored |
 | Child session | A session spawned by an agent: a subagent, task, or delegated worker. Rolled into its parent, never scored on its own |
@@ -45,7 +45,7 @@ shared and must behave identically.
 ## 3. Adapter contract
 
 An adapter has a `name` (the `harness` value stored in every row, lowercase, for
-example `opencode`, `claude-code`, `claude-desktop`, `codex`) and three operations:
+example `opencode`, `claude`, `codex`) and three operations:
 
 - `version()`: the harness version string, stored per row.
 - `sessions()`: every session the harness knows about on this machine, as session records.
@@ -108,7 +108,7 @@ Map each harness's tool names onto the reference vocabulary, so the same work
 reads the same way to Jev whatever harness did it. Unknown tools fall through to
 `name: <first string input>`, which works but carries less signal.
 
-| Reference name | Input fields used | Claude Code equivalent (example mapping) |
+| Reference name | Input fields used | Claude equivalent (example mapping) |
 | --- | --- | --- |
 | `shell` | `command` | `Bash` |
 | `read` | `path` or `filePath` | `Read` |
@@ -130,12 +130,16 @@ Two more adapter rules keep harnesses comparable:
   on demand or rendering an end-of-turn summary. Each one would otherwise count
   as an agent step.
 - **Shorten harness temp paths.** Rewrite per-session temp directories to a
-  short placeholder, as home paths become `~`. Claude Code's
+  short placeholder, as home paths become `~`. Claude's
   `/tmp/claude-502/…`, for example, would otherwise match the AI-CLI pattern
   below on every command that touches it.
 
-Chat-first harnesses such as Claude Desktop have fewer tools, but the same idea
-applies. Represent artifacts as `write: <artifact title>`, analysis or code
+One adapter may cover several products that share an engine and transcript
+format, as `claude` covers Claude Code and the Claude desktop app's Code tab and
+Cowork mode. Use one `name` for them, so their sessions land in one distribution.
+
+Chat-first harnesses, such as claude.ai chats read from a data export, have
+fewer tools, but the same idea applies. Represent artifacts as `write: <artifact title>`, analysis or code
 execution as `execute`, web search as `websearch`, MCP calls as
 `<server>.<tool>`, and uploaded files as `files` on the user message.
 
@@ -315,7 +319,7 @@ An adapter is done when all of these hold:
 4. **Scores are stable.** Rescoring the same 20 sessions twice should move scores
    by about 0.05 at most. Jev itself varies, so run the same check on an
    already-supported harness on the same day as a control. In October 2026 both
-   OpenCode and Claude Code averaged about 0.02, but single sessions moved by up
+   OpenCode and Claude averaged about 0.02, but single sessions moved by up
    to about 0.1 in complexity and 0.2 in leverage. Drift well above the control
    points to the adapter, for example a session that changes between runs.
 5. **Labels are not too few or too tied.** If the machine has fewer sessions than
