@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Rate the complexity of every OpenCode v2 session on this machine with TypeSafe's Jev.
+"""judge-my-agent-habits: rate every AI agent session on this machine with TypeSafe's Jev.
 
-Reads sessions through the local OpenCode service (`opencode api`), asks Jev how much
-work each session represents, and writes one row per session into a SQLite database
-that can be merged with databases from other machines.
+Reads sessions from a supported agent harness (currently OpenCode v2, through
+`opencode api`), asks Jev how much work each session represents and how it was
+delegated, and writes one row per session into a SQLite database that can be
+merged with databases from other machines and other harnesses. See SPEC.md.
 
-Standard library only. Requires Python 3.9+, OpenCode v2 on PATH, and TYPESAFE_API_KEY.
+Standard library only. Requires Python 3.9+, a supported harness, and TYPESAFE_API_KEY.
 """
 from __future__ import annotations
 
@@ -33,7 +34,11 @@ SCORER_VERSION = "2"
 DEFAULT_MODEL = "jev-1.13.0"
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 HOME = str(pathlib.Path.home())
-DEFAULT_DB = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share")) / "opencode-session-complexity" / "sessions.sqlite"
+HARNESS = "opencode"
+_DATA = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share"))
+_NEW_DB = _DATA / "judge-my-agent-habits" / "sessions.sqlite"
+_LEGACY_DB = _DATA / "opencode-session-complexity" / "sessions.sqlite"  # pre-rename location
+DEFAULT_DB = _LEGACY_DB if _LEGACY_DB.exists() and not _NEW_DB.exists() else _NEW_DB
 
 # ---------------------------------------------------------------------------
 # Jev questions. Changing any of these changes SCORER_HASH, which rescores sessions.
@@ -157,6 +162,10 @@ def find_opencode() -> str:
 
 
 class OpenCode:
+    """Harness adapter for OpenCode v2. Every adapter provides name, version(), sessions(), messages(id)."""
+
+    name = "opencode"
+
     def __init__(self, binary: str):
         self.binary = binary
 
@@ -191,6 +200,18 @@ class OpenCode:
 
     def messages(self, session_id: str):
         return self.paged(f"/api/session/{session_id}/message", first_order="asc")
+
+
+def open_opencode():
+    oc = OpenCode(find_opencode())
+    version = oc.version()
+    if not re.search(r"\bv?2\.", version):
+        print(f"warning: expected OpenCode v2, found {version!r}", file=sys.stderr)
+    return oc
+
+
+# Adapters by --harness id. A new harness adds an entry here; see SPEC.md.
+HARNESSES = {"opencode": open_opencode}
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +445,7 @@ class Jev:
             req = urllib.request.Request(TYPESAFE_URL, data=body, method="POST", headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": f"opencode-session-complexity/{SCORER_VERSION}",
+                "User-Agent": f"judge-my-agent-habits/{SCORER_VERSION}",
             })
             try:
                 with urllib.request.urlopen(req, timeout=90) as r:
@@ -453,6 +474,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   machine TEXT NOT NULL,
   session_id TEXT NOT NULL,
+  harness TEXT DEFAULT 'opencode', -- which agent harness the session came from (see SPEC.md)
   title TEXT,
   directory TEXT,
   project_id TEXT,
@@ -520,7 +542,7 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 COLUMNS = [
-    "machine", "session_id", "title", "directory", "project_id", "agent", "model", "models_used", "fork_of", "launched_by_program", "launch_source",
+    "machine", "session_id", "harness", "title", "directory", "project_id", "agent", "model", "models_used", "fork_of", "launched_by_program", "launch_source",
     "created_at", "created_ms", "updated_ms", "day", "week", "month", "outcome",
     "user_messages", "assistant_messages", "tool_calls", "distinct_tools", "subagent_calls", "subagent_sessions",
     "files_edited", "active_seconds", "wall_seconds",
@@ -540,7 +562,7 @@ def connect(path: pathlib.Path):
     db.executescript(SCHEMA)
     # migrate databases created before these columns existed
     have = {r[1] for r in db.execute("PRAGMA table_info(sessions)")}
-    for col, decl in (("complexity_p6", "REAL"), ("leverage", "REAL")):
+    for col, decl in (("complexity_p6", "REAL"), ("leverage", "REAL"), ("harness", "TEXT DEFAULT 'opencode'")):
         if col not in have:
             db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
     return db
@@ -575,6 +597,7 @@ def base_row(machine, session, children, opencode_version):
     return {
         "machine": machine,
         "session_id": session["id"],
+        "harness": HARNESS,
         "title": session.get("title"),
         "directory": tidy((session.get("location") or {}).get("directory") or ""),
         "project_id": session.get("projectID"),
@@ -604,6 +627,7 @@ def base_row(machine, session, children, opencode_version):
 
 def score_one(oc, jev, machine, session, children, opencode_version):
     row = base_row(machine, session, children, opencode_version)
+    row["harness"] = oc.name
     row["scorer_hash"], row["scored_at"] = SCORER_HASH, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     try:
         state, metrics, other_ai = analyze(session, oc.messages(session["id"]))
@@ -643,15 +667,13 @@ def cmd_score(args):
     api_key = os.environ.get("TYPESAFE_API_KEY")
     if not api_key and not args.dry_run:
         sys.exit("error: set TYPESAFE_API_KEY (get one at https://console.typesafe.ai)")
-    oc = OpenCode(find_opencode())
+    oc = HARNESSES[args.harness]()
     version = oc.version()
-    if not re.search(r"\bv?2\.", version):
-        print(f"warning: expected OpenCode v2, found {version!r}", file=sys.stderr)
     machine = args.machine or socket.gethostname().split(".")[0]
     db = connect(pathlib.Path(args.db).expanduser())
     jev = Jev(api_key or "", args.model)
 
-    print(f"machine={machine} opencode={version} model={args.model} scorer={SCORER_HASH} db={args.db}", file=sys.stderr)
+    print(f"machine={machine} harness={oc.name} version={version} model={args.model} scorer={SCORER_HASH} db={args.db}", file=sys.stderr)
     all_sessions = oc.sessions()
     children = {}
     for s in all_sessions:
@@ -665,7 +687,7 @@ def cmd_score(args):
         roots = [s for s in roots if s["id"] in set(args.session)]
 
     done = {}
-    for sid, updated, status, scorer, model in db.execute("SELECT session_id, updated_ms, status, scorer_hash, jev_model FROM sessions WHERE machine = ?", (machine,)):
+    for sid, updated, status, scorer, model in db.execute("SELECT session_id, updated_ms, status, scorer_hash, jev_model FROM sessions WHERE machine = ? AND harness = ?", (machine, oc.name)):
         done[sid] = (updated, status, scorer, model)
 
     def stale(s):
@@ -715,7 +737,10 @@ def cmd_merge(args):
     out = connect(pathlib.Path(args.output).expanduser())
     for src in args.inputs:
         out.execute("ATTACH DATABASE ? AS src", (str(pathlib.Path(src).expanduser()),))
-        n = out.execute(f"INSERT OR REPLACE INTO sessions ({','.join(COLUMNS)}) SELECT {','.join(COLUMNS)} FROM src.sessions").rowcount
+        # Inputs may predate newer columns; copy the shared ones and let defaults fill the rest.
+        have = {r[1] for r in out.execute("PRAGMA src.table_info(sessions)")}
+        cols = ",".join(c for c in COLUMNS if c in have)
+        n = out.execute(f"INSERT OR REPLACE INTO sessions ({cols}) SELECT {cols} FROM src.sessions").rowcount
         try:
             out.execute("INSERT INTO runs SELECT * FROM src.runs")
         except sqlite3.OperationalError:
@@ -795,6 +820,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("score", help="score sessions on this machine (default)")
+    s.add_argument("--harness", choices=sorted(HARNESSES), default="opencode", help="which agent harness to read sessions from (default opencode)")
     s.add_argument("--db", default=str(DEFAULT_DB), help=f"SQLite output (default {DEFAULT_DB})")
     s.add_argument("--machine", help="machine label stored with each row (default: short hostname)")
     s.add_argument("--model", default=DEFAULT_MODEL, help=f"Jev model; pinned so scores stay comparable over time (default {DEFAULT_MODEL})")

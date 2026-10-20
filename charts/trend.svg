@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="380" viewBox="0 0 800 380">
 <rect width="800" height="380" fill="#ffffff"/>
 <text x="12.0" y="20.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="14" fill="#24292f" text-anchor="start" font-weight="600">Mean complexity by week</text>
-<text x="12.0" y="38.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="11" fill="#6e7781" text-anchor="start">n=497 · weighted mean=1.80</text>
+<text x="12.0" y="38.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="11" fill="#6e7781" text-anchor="start">n=501 · weighted mean=1.80</text>
 <line x1="90" y1="338.0" x2="750" y2="338.0" stroke="#e1e4e8"/>
 <text x="66.0" y="342.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="10" fill="#6e7781" text-anchor="middle">1.53</text>
 <line x1="90" y1="201.0" x2="750" y2="201.0" stroke="#e1e4e8"/>
 <text x="66.0" y="205.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="10" fill="#6e7781" text-anchor="middle">1.91</text>
 <line x1="90" y1="64.0" x2="750" y2="64.0" stroke="#e1e4e8"/>
 <text x="66.0" y="68.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="10" fill="#6e7781" text-anchor="middle">2.30</text>
-<polyline points="90.0,282.5 150.0,95.6 210.0,286.2 270.0,198.4 330.0,306.4 390.0,277.6 450.0,169.5 510.0,201.8 570.0,268.8 630.0,214.9 690.0,229.5 750.0,98.4" fill="none" stroke="#d97706" stroke-width="2.5"/>
+<polyline points="90.0,282.5 150.0,95.6 210.0,286.2 270.0,198.4 330.0,306.4 390.0,277.6 450.0,169.5 510.0,201.8 570.0,268.8 630.0,214.9 690.0,229.5 750.0,156.0" fill="none" stroke="#d97706" stroke-width="2.5"/>
 <circle cx="90.0" cy="282.5" r="3.5" fill="#d97706"/>
 <text x="90.0" y="54.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="9" fill="#6e7781" text-anchor="middle">47</text>
 <text x="90.0" y="356.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="10" fill="#6e7781" text-anchor="middle">2026-W32</text>
@@ -37,7 +37,7 @@
 <circle cx="690.0" cy="229.5" r="3.5" fill="#d97706"/>
 <text x="690.0" y="54.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="9" fill="#6e7781" text-anchor="middle">42</text>
 <text x="690.0" y="356.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="10" fill="#6e7781" text-anchor="middle">2026-W42</text>
-<circle cx="750.0" cy="98.4" r="3.5" fill="#d97706"/>
-<text x="750.0" y="54.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="9" fill="#6e7781" text-anchor="middle">9</text>
+<circle cx="750.0" cy="156.0" r="3.5" fill="#d97706"/>
+<text x="750.0" y="54.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="9" fill="#6e7781" text-anchor="middle">13</text>
 <text x="46.0" y="50.0" font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size="9" fill="#6e7781" text-anchor="middle">n sessions above</text>
 </svg>

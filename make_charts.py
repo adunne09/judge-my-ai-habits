@@ -122,9 +122,15 @@ def trend_chart(rows):
     return out, "</svg>"
 
 
+def default_db():
+    data = pathlib.Path.home() / ".local" / "share"
+    new, legacy = data / "judge-my-agent-habits" / "sessions.sqlite", data / "opencode-session-complexity" / "sessions.sqlite"
+    return str(legacy if legacy.exists() and not new.exists() else new)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="~/.local/share/opencode-session-complexity/sessions.sqlite")
+    ap.add_argument("--db", default=default_db())
     args = ap.parse_args()
     db = sqlite3.connect(pathlib.Path(args.db).expanduser())
     outdir = pathlib.Path(__file__).parent / "charts"
