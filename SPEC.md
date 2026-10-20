@@ -70,11 +70,11 @@ Field names follow the reference adapter. An adapter maps its harness's data ont
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `id` | yes | Stable unique id. If ids could collide with another harness's, prefix them (for example `cc_…`) |
-| `time.created`, `time.updated` | yes | Epoch milliseconds. `updated` must change whenever the session gains content |
+| `time.created`, `time.updated` | yes | Epoch milliseconds. `updated` must change whenever the session gains content, including content in its child sessions. Prefer the latest message timestamp over a file's mtime when the harness also rewrites metadata (such as titles) in place, or unchanged sessions get rescored |
 | `title` | no | The harness's title for the session, if any |
 | `parentID` | yes, if the harness has subagents | Parent session id for child sessions |
-| `fork.sessionID` | no | Set when the session was forked or branched from another. Forks are excluded from the personal set |
-| `metadata.source`, `permissions` | no | Any deterministic sign that a **program**, not a person, created the session: SDK/API launch, scheduler, CI, headless `-p` mode. It sets `launched_by_program = 1` |
+| `fork.sessionID` | no | Set when the session was forked or branched from another. Forks are excluded from the personal set. If the harness has no explicit fork field but copies history into the new session, shared message ids are a deterministic signal: the earliest session to start with a message is the original |
+| `metadata.source`, `permissions` | no | Any deterministic sign that a **program**, not a person, created the session: SDK/API launch, scheduler, CI, headless `-p` mode, or a first message the harness marks as coming from another agent or a notification rather than a person. It sets `launched_by_program = 1`. Check that the harness's own GUI isn't caught by the rule: a desktop app may drive the harness through its SDK too |
 | `tokens.{input,output,reasoning,cache.read,cache.write}`, `cost` | no | Usage, summed with child sessions into `tokens_total` and `cost_usd`. If the harness doesn't record usage, store **NULL**, never 0: reports and the dashboard treat NULL as unknown and show coverage, while a 0 would drag every token average down |
 | `model.{providerID,id}`, `agent`, `location.directory`, `projectID`, `outcome` | no | Descriptive columns |
 
@@ -94,7 +94,10 @@ This is what the state builder (`analyze()` in the reference code) consumes:
 
 - `user` is a message the person typed. **Exclude** synthetic user-role messages
   that harnesses inject: tool results, system reminders, compaction summaries,
-  hook output. Counting them as user messages inflates scores badly.
+  hook output, subagent hand-backs, and task notifications. Counting them as user
+  messages inflates scores badly. Conversely, **include** messages the person typed
+  that the harness delivers out of band, such as a message queued while the agent
+  was busy and injected mid-turn.
 - `assistant` is one agent step. `content` holds its text and tool calls in order.
 - `shell` is a command the person ran directly through the harness, if supported.
 - `files` and `skills` are optional lists of attachments. Only their count and names are used.
@@ -116,8 +119,20 @@ reads the same way to Jev whatever harness did it. Unknown tools fall through to
 | `websearch` | `query` | `WebSearch` |
 | `skill` | `id` or `name` | `Skill` |
 | `question` | `questions[].question` | `AskUserQuestion` |
+| `todowrite` | none (the list itself is left out) | `TodoWrite`, `TaskCreate`, `TaskUpdate` |
 | `execute` | `code` (tool calls are extracted from `tools.x.y(...)` references) | code-mode runtimes |
 | `<server>.<tool>` | any string input | MCP tools such as `mcp__linear__save_issue` → `linear.save_issue` |
+
+Two more adapter rules keep harnesses comparable:
+
+- **Drop harness bookkeeping.** Leave out tool calls that only maintain the
+  harness itself and have no counterpart elsewhere, such as loading tool schemas
+  on demand or rendering an end-of-turn summary. Each one would otherwise count
+  as an agent step.
+- **Shorten harness temp paths.** Rewrite per-session temp directories to a
+  short placeholder, as home paths become `~`. Claude Code's
+  `/tmp/claude-502/…`, for example, would otherwise match the AI-CLI pattern
+  below on every command that touches it.
 
 Chat-first harnesses such as Claude Desktop have fewer tools, but the same idea
 applies. Represent artifacts as `write: <artifact title>`, analysis or code
@@ -297,10 +312,18 @@ An adapter is done when all of these hold:
    reference reached 0.96 and 0.95. Also label leverage on a subset and check it.
 3. **The top of the scale still holds.** `validation/check_frontier.py` must pass:
    every synthetic frontier anchor scores complexity ≥ 5.0 and leverage ≥ 4.5.
-4. **Scores are stable.** Rescoring the same 20 sessions twice moves no session by more than about 0.05.
-5. **Filters work.** Spot-check that test runs and scripted or launched sessions
+4. **Scores are stable.** Rescoring the same 20 sessions twice should move scores
+   by about 0.05 at most. Jev itself varies, so run the same check on an
+   already-supported harness on the same day as a control. In October 2026 both
+   OpenCode and Claude Code averaged about 0.02, but single sessions moved by up
+   to about 0.1 in complexity and 0.2 in leverage. Drift well above the control
+   points to the adapter, for example a session that changes between runs.
+5. **Labels are not too few or too tied.** If the machine has fewer sessions than
+   the protocol asks for, say so and report the numbers as small-sample. A holdout
+   crowded onto one or two label values gives a noisy Spearman.
+6. **Filters work.** Spot-check that test runs and scripted or launched sessions
    are excluded from `human_sessions`, and that forks are flagged.
-6. **Merge works.** Merge the new database with an existing one from another
+7. **Merge works.** Merge the new database with an existing one from another
    harness and check `report`. Merge should not warn about scorer hashes.
 
 When iterating:

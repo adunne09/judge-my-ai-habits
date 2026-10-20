@@ -107,7 +107,7 @@ can be reimplemented for any agent client.
 | Harness | Status | `--harness` |
 | --- | --- | --- |
 | [OpenCode](https://opencode.ai) v2 | Supported | `opencode` (default) |
-| Claude Code | Coming soon | |
+| [Claude Code](https://claude.com/claude-code) (CLI, IDE extensions, desktop app's Code tab) | Supported | `claude-code` |
 | Claude Desktop | Coming soon | |
 | Codex CLI | Coming soon | |
 | Cursor | Coming soon | |
@@ -123,6 +123,75 @@ installation uses and never opens OpenCode's database directly. Responses are
 written to a temp file, because `opencode api` can truncate large responses
 written to a pipe. Child sessions (`parentID`) are subagents. A launcher
 `metadata.source` or per-session `permissions` marks program-launched sessions.
+
+### Harness notes: Claude Code
+
+Reads the JSONL transcripts Claude Code writes to `~/.claude/projects/<project>/<session>.jsonl`
+(or `$CLAUDE_CONFIG_DIR/projects`), read-only, skipping a partial last line
+while a session is still writing. No `claude` binary is needed. The CLI, the
+IDE extensions, and the desktop app's Code tab all write the same transcripts.
+
+Mapping decisions:
+
+- **User messages** are `user` records holding text the person typed. Tool
+  results, skill expansions (`isMeta`), compaction summaries, interrupt notices,
+  slash-command output, `<system-reminder>` blocks, and prompts whose `origin`
+  isn't human (subagent hand-backs, task notifications) are left out. Messages
+  typed while the agent was busy arrive as `queued_command` attachments and
+  count when their origin is human. A slash command counts as what was typed
+  (`/name args`), except built-in UI commands such as `/model` or `/clear`.
+  `!` shell commands become `user ran shell: …`. `@` file mentions and pasted
+  images count as attachments.
+- **Agent steps**: Claude Code writes each content block of an API response as
+  its own record. Blocks that share a `message.id` are one step. Error notices
+  Claude Code writes itself (model `<synthetic>`) are dropped.
+- **Tools** map onto the shared vocabulary (`Bash` → `shell`, `Agent`/`Task` →
+  `subagent`, `TodoWrite`/`TaskCreate` → `todowrite`, …). MCP tools become
+  `server.tool`. The desktop app names claude.ai connectors by UUID; the adapter
+  reads their names from the app's session files, so `mcp__<uuid>__slack_read_thread`
+  reads as `slack.slack_read_thread`. Harness bookkeeping with no counterpart
+  elsewhere (`ToolSearch`, `TaskList`, the desktop's end-of-turn summary card)
+  is dropped.
+- **Per-session temp paths** (`/private/tmp/claude-502/<project>/<session>/scratchpad`)
+  are shortened to `$SCRATCHPAD`, as home paths become `~`. Left in, `/claude-502`
+  matches the shared AI-CLI pattern, and nearly every desktop session read as
+  "ran the `claude` CLI", which is evidence for the orchestration levels of `leverage`.
+- **Subagents** are `<session>/subagents/agent-*.jsonl`. They become child
+  sessions with ids `<session>/agent-…`, so their tokens roll up and they count
+  toward `subagents_launched`. Older layouts (inline `isSidechain` records and
+  project-level `agent-*.jsonl` files) are handled the same way but weren't
+  available to test.
+- **Forks**: rewinding or branching copies a session's history, message uuids
+  included, into a new transcript. The earliest transcript to start with a
+  given message is the original; later ones get `fork_of`.
+- **`launched_by_program`**: set when the session was started by `claude -p` or
+  an Agent SDK (entrypoint `sdk-cli`, `sdk-ts`, `sdk-py`) and its first prompt isn't
+  marked as human, or when the first prompt's `origin` isn't human. The desktop
+  app drives Claude Code through the SDK too, but records entrypoint
+  `claude-desktop` and a human origin, so its sessions count as personal.
+- **`updated`** is the latest record timestamp across the transcript and its
+  subagents, not the file's mtime, so metadata the desktop app rewrites (titles)
+  doesn't trigger a rescore.
+- **Titles**: the latest `custom-title`, else `ai-title`, else `summary` record.
+- **Tokens** are summed once per `message.id`. Thinking tokens are part of
+  `output_tokens` and are stored as `tokens_reasoning`. Ids are Claude Code's
+  session UUIDs, unprefixed: they can't collide with OpenCode's `ses_…` ids.
+
+Known gaps:
+
+- **Cost is NULL.** Claude Code doesn't record per-message cost.
+- **Untested signals.** `launched_by_program` wasn't exercised on the
+  validation machine, which had no SDK, `-p`, or scheduled sessions. Nor were
+  the older subagent layouts. Desktop scheduled tasks and sessions spawned by
+  other sessions have no deterministic marker the adapter knows of yet.
+- **Transcript retention.** Claude Code deletes transcripts after
+  `cleanupPeriodDays` (default 30), so score regularly or raise that setting
+  to keep history.
+- **Cowork is excluded.** Claude Desktop's Cowork mode runs the same engine and
+  writes the same transcript format, under
+  `~/Library/Application Support/Claude/local-agent-mode-sessions/`. It isn't
+  read by this adapter: it belongs to the Claude Desktop harness. A
+  `claude-desktop` adapter can subclass `ClaudeCode` with those roots.
 
 ## Run it
 
@@ -190,7 +259,7 @@ Other `score` options:
 
 | Flag | Effect |
 | --- | --- |
-| `--harness opencode` | Which harness to read sessions from |
+| `--harness opencode` | Which harness to read sessions from: `opencode` (default) or `claude-code` |
 | `--since 2026-09-01` | Only sessions created on or after that date |
 | `--limit N` | Score at most N sessions, newest first |
 | `--session <id>` | Score specific sessions (repeatable) |
@@ -369,6 +438,56 @@ top of the scale).
 | Harness | Dev Spearman | Holdout Spearman | Frontier check | Repeat-run drift |
 | --- | --- | --- | --- | --- |
 | OpenCode v2 | 0.96 (31) | 0.95 (34) | Pass: 5.3–6.0 complexity, 4.9–5.0 leverage | ≤ 0.05 |
+| Claude Code 2.1 | 0.96 (16) | 0.87 (14) | Pass: 5.3–6.0 complexity, 4.9–5.0 leverage | mean 0.02, max 0.12 (see below) |
+
+**Claude Code.** The validation machine had only 15 usable Claude Code
+sessions, fewer than the protocol's 30 + 20. They were topped up with 16
+sessions from Claude Desktop's Cowork mode, which runs the same engine and
+writes the same transcript format. Those were read through the same adapter
+into a scratch database only. That gave 16 dev and 15 holdout sessions,
+labelled from their states before any scoring. One holdout session turned out
+to be empty, leaving 14.
+
+- **Dev:** complexity Spearman 0.96 (MAE 0.22); leverage 0.92.
+- **Holdout**, scored once with no tuning: complexity 0.87 (MAE 0.41), below the
+  0.90 target; leverage 0.60.
+- **Why the holdout is lower.** It is crowded at the low end: 10 of 14 labels
+  are 1 or 1.5, so a few rank swaps cost a lot.
+  - Complexity: three of those are near-identical "install this MCP server"
+    sessions where the agent refused or stopped at a plan awaiting approval; Jev
+    put them at about 2.0. Two Cowork sessions (a briefing setup and a video
+    lesson build) scored about a level above their labels.
+  - Leverage: for the two plan-awaiting-approval sessions, where nothing ran,
+    Jev gave about 1.7 against labels of 0.5. In dev, a similar no-action
+    session went the other way: labelled 2, scored 1.0. "Delegated, but
+    nothing happened" is ambiguous on the leverage scale; that comes from the
+    question, not the adapter.
+- **Split by source:** holdout complexity is 0.82 on Claude Code rows (8) and
+  0.93 on Cowork rows (6). Holdout leverage is 0.16 on Claude Code rows, almost
+  all of them tied MCP-setup sessions, and 0.85 on Cowork rows.
+
+Treat these numbers as small-sample; the dev set is
+where adapter choices were compared:
+
+| Claude Code variant (dev, n=16) | Complexity | Leverage |
+| --- | --- | --- |
+| Adapter as shipped | 0.96 | 0.92 |
+| Temp paths left raw (`/tmp/claude-502/…` matches the AI-CLI pattern) | 0.97 | 0.90 |
+| Bookkeeping tools kept (`ToolSearch`, summary card) | 0.97 | 0.92 |
+| Raw Claude Code tool names (`Bash`, `mcp__<uuid>__…`) instead of the shared vocabulary | 0.97 | 0.88 |
+
+Complexity barely moves between variants. Leverage is where the vocabulary and
+the temp-path fix pay off; per session, the changes moved leverage by up to
+0.36. The temp-path fix is kept for correctness either way: without it,
+`other_ai_agents_run_from_shell` claims the `claude` CLI ran in nearly every
+desktop session.
+
+**Repeat-run drift.** Rescoring 30 sessions twice moved complexity by 0.02 on
+average and at most 0.12, and leverage by at most 0.19. Eight sessions moved by
+more than 0.05. The same check on 20 OpenCode sessions, on the same day, gave
+the same picture (mean 0.02; max 0.10 complexity, 0.19 leverage). So this is
+Jev's own variation today, not the adapter. The ≤ 0.05 figure in the OpenCode
+row is from its original validation.
 
 ### Keeping scores comparable over time
 

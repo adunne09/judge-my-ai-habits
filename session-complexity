@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """judge-my-ai-habits: rate every AI agent session on this machine with TypeSafe's Jev.
 
-Reads sessions from a supported agent harness (currently OpenCode v2, through
-`opencode api`), asks Jev how much work each session represents and how it was
-delegated, and writes one row per session into a SQLite database that can be
+Reads sessions from a supported agent harness (OpenCode v2 through `opencode api`,
+or Claude Code's transcripts in ~/.claude/projects), asks Jev how much work each
+session represents and how it was delegated, and writes one row per session into a SQLite database that can be
 merged with databases from other machines and other harnesses. See SPEC.md.
 
 Standard library only. Requires Python 3.9+, a supported harness, and TYPESAFE_API_KEY.
@@ -210,8 +210,292 @@ def open_opencode():
     return oc
 
 
+# ---------------------------------------------------------------------------
+# Claude Code access
+# ---------------------------------------------------------------------------
+
+# Claude Code tool names -> the shared vocabulary (SPEC.md section 3), and the input
+# fields describe_tool() reads. Anything else falls through under its own name.
+CC_TOOLS = {
+    "Bash": "shell", "Read": "read", "Write": "write", "Edit": "edit", "MultiEdit": "multiedit", "NotebookEdit": "edit",
+    "Glob": "glob", "Grep": "grep", "Agent": "subagent", "Task": "subagent", "WebFetch": "webfetch", "WebSearch": "websearch",
+    "Skill": "skill", "AskUserQuestion": "question", "TodoWrite": "todowrite", "TaskCreate": "todowrite", "TaskUpdate": "todowrite",
+    "mcp__ccd_turn__update_plan": "todowrite",
+}
+# Harness bookkeeping with no counterpart in other harnesses: loading tool schemas,
+# reading back the todo list, and the desktop app's end-of-turn summary card.
+CC_PLUMBING = {"ToolSearch", "TaskList", "TaskGet", "mcp__ccd_turn__wrap_up"}
+# Entrypoints that mean a program started the session: `claude -p` and the Agent SDKs.
+CC_PROGRAM_ENTRYPOINTS = {"sdk-cli", "sdk-ts", "sdk-py"}
+# User-role text that Claude Code injects rather than the person typing it.
+CC_SYNTHETIC = re.compile(r"^\s*(?:\[Request interrupted by user|<local-command-|<bash-std|<task-notification>|<user-prompt-submit-hook>|Caveat: The messages below were generated)")
+# Built-in slash commands that change settings or the UI instead of sending a prompt.
+CC_UI_COMMANDS = {"/clear", "/compact", "/model", "/config", "/help", "/resume", "/cost", "/status", "/login", "/logout", "/exit", "/quit",
+                  "/mcp", "/permissions", "/memory", "/context", "/usage", "/doctor", "/theme", "/agents", "/hooks", "/ide", "/rename", "/fast"}
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Per-session temp directories, e.g. /private/tmp/claude-502/-Users-me/<session id>/scratchpad. Shortened
+# like home paths are; left as is, the `/claude-502` in them reads as running the `claude` CLI.
+CC_TMP = re.compile(r"(?:/private)?/tmp/claude-\d+/[^/\s'\"]+/[0-9a-f-]{36}(?:/scratchpad)?")
+
+
+def iso_ms(ts):
+    try:
+        return int(dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def read_jsonl(path):
+    # Claude Code appends to transcripts while it runs, so skip a partial last line.
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                yield r
+
+
+def cc_text(content):
+    """(text, image count) of a user message's content: a string or a list of blocks."""
+    if isinstance(content, str):
+        return content, 0
+    blocks = [b for b in content or [] if isinstance(b, dict)]
+    if any(b.get("type") == "tool_result" for b in blocks):
+        return "", 0
+    return "\n".join(b.get("text") or "" for b in blocks if b.get("type") == "text"), sum(1 for b in blocks if b.get("type") == "image")
+
+
+def cc_usage(records):
+    """Token usage of transcript records. Content blocks of one API response share its message id and usage."""
+    seen, tok = set(), {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    for r in records:
+        msg = r.get("message") or {}
+        u = msg.get("usage")
+        if r.get("type") != "assistant" or not isinstance(u, dict) or msg.get("id") in seen:
+            continue
+        seen.add(msg.get("id"))
+        thinking = int((u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)  # included in output_tokens
+        tok["input"] += int(u.get("input_tokens") or 0)
+        tok["output"] += int(u.get("output_tokens") or 0) - thinking
+        tok["reasoning"] += thinking
+        tok["cache"]["read"] += int(u.get("cache_read_input_tokens") or 0)
+        tok["cache"]["write"] += int(u.get("cache_creation_input_tokens") or 0)
+    return tok
+
+
+class ClaudeCode:
+    """Harness adapter for Claude Code: the CLI, the IDE extensions, and the desktop app's Code tab.
+
+    Reads the JSONL transcripts under ~/.claude/projects (or $CLAUDE_CONFIG_DIR/projects)
+    read-only. Subagent transcripts in <session>/subagents/ become child sessions.
+    """
+
+    name = "claude-code"
+
+    def __init__(self, root: pathlib.Path):
+        self.root = root
+        self.paths = {}
+        self.mcp_names = self.desktop_connector_names()
+
+    def transcripts(self):
+        return sorted(self.root.glob("projects/*/*.jsonl"))
+
+    def version(self) -> str:
+        files = sorted(self.transcripts(), key=lambda p: p.stat().st_mtime)
+        version = None
+        for r in read_jsonl(files[-1]) if files else []:
+            version = r.get("version") or version
+        return f"claude-code {version}" if version else "claude-code"
+
+    @staticmethod
+    def desktop_connector_names():
+        # The desktop app names claude.ai connectors' MCP servers by UUID; its session files map them to names.
+        names = {}
+        for f in pathlib.Path.home().glob("Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json"):
+            try:
+                for s in json.loads(f.read_text(encoding="utf-8")).get("remoteMcpServersConfig") or []:
+                    if s.get("uuid") and s.get("name"):
+                        names[s["uuid"]] = s["name"]
+            except (OSError, ValueError, AttributeError):
+                continue
+        return names
+
+    def tool_name(self, name):
+        if name in CC_TOOLS:
+            return CC_TOOLS[name]
+        if name.startswith("mcp__") and "__" in name[5:]:
+            server, tool = name[5:].split("__", 1)
+            if UUID_RE.match(server) and server in self.mcp_names:
+                server = self.mcp_names[server]
+            elif server.startswith("claude_ai_"):  # the CLI's names for claude.ai connectors
+                server = server[len("claude_ai_"):]
+            else:
+                return f"{server}.{tool}"
+            return f"{re.sub(r'[^a-z0-9]+', '-', server.lower()).strip('-')}.{tool}"
+        return name
+
+    @staticmethod
+    def tool_input(name, inp):
+        if not isinstance(inp, dict):
+            return inp
+        if CC_TOOLS.get(name) == "todowrite":  # the list itself, like OpenCode's todowrite
+            return {}
+        inp = {k: CC_TMP.sub("$SCRATCHPAD", v) if isinstance(v, str) else v for k, v in inp.items()}
+        path = inp.get("file_path") or inp.get("notebook_path")
+        if path:
+            inp["filePath"] = path
+        if name == "Skill" and inp.get("skill"):
+            inp["name"] = inp["skill"]
+        return inp
+
+    def record(self, path: pathlib.Path, sid: str, records, parent=None):
+        """Session record for one transcript (SPEC.md section 3)."""
+        stamps = [ms for ms in (iso_ms(r["timestamp"]) for r in records if r.get("timestamp")) if ms]
+        titles = {"custom-title": None, "ai-title": None, "summary": None}
+        for r in records:
+            key = {"custom-title": "customTitle", "ai-title": "aiTitle", "summary": "summary"}.get(r.get("type"))
+            if key and r.get(key):
+                titles[r["type"]] = r[key]
+        convo = [r for r in records if r.get("type") in ("user", "assistant")]
+        models = [(r.get("message") or {}).get("model") for r in convo if r.get("type") == "assistant"]
+        models = [m for m in models if m and m != "<synthetic>"]
+        first = next((r for r in convo if r.get("type") == "user"), {})
+        origin = (first.get("origin") or {}).get("kind")
+        entry = first.get("entrypoint")
+        source = None
+        if origin not in (None, "human"):
+            source = f"origin:{origin}"
+        elif entry in CC_PROGRAM_ENTRYPOINTS and origin != "human":
+            source = entry
+        versions = [r["version"] for r in convo if r.get("version")]
+        forked = next((r.get("forkedFrom") for r in records if isinstance(r.get("forkedFrom"), dict)), None)
+        session = {
+            "id": sid,
+            "time": {"created": min(stamps) if stamps else int(path.stat().st_mtime * 1000), "updated": max(stamps) if stamps else None},
+            "title": titles["custom-title"] or titles["ai-title"] or titles["summary"],
+            "location": {"directory": next((r.get("cwd") for r in convo if r.get("cwd")), None)},
+            "projectID": path.parent.name if parent is None else None,
+            "model": {"providerID": "anthropic", "id": max(set(models), key=models.count)} if models else {},
+            "tokens": cc_usage(convo),
+            "cost": None,  # Claude Code does not record per-message cost
+            "metadata": {"source": source, "entrypoint": entry},
+            "version": versions[-1] if versions else None,
+            "first_uuid": convo[0].get("uuid") if convo else None,
+        }
+        if forked and forked.get("sessionId"):
+            session["fork"] = {"sessionID": forked["sessionId"]}
+        if parent:
+            session["parentID"] = parent
+        return session
+
+    def sessions(self):
+        out = []
+        for path in self.transcripts():
+            records = list(read_jsonl(path))
+            if path.stem.startswith("agent-"):  # older versions kept subagent transcripts beside the session
+                parent = next((r.get("sessionId") for r in records if r.get("sessionId")), None)
+                if parent:
+                    out.append(self.record(path, f"{parent}/{path.stem}", records, parent))
+                continue
+            sid = path.stem
+            self.paths[sid] = path
+            main = [r for r in records if not r.get("isSidechain")]
+            root = self.record(path, sid, main)
+            children = []
+            inline = [r for r in records if r.get("isSidechain")]  # older versions kept subagents inline
+            if inline:
+                children.append(self.record(path, f"{sid}/sidechain", inline, sid))
+            for sub in sorted((path.parent / sid / "subagents").glob("*.jsonl")):
+                children.append(self.record(sub, f"{sid}/{sub.stem}", list(read_jsonl(sub)), sid))
+            # A session gains content when a subagent does, too.
+            ups = [s["time"]["updated"] for s in [root] + children if s["time"]["updated"]]
+            root["time"]["updated"] = max(ups) if ups else None
+            out += [root] + children
+        # A forked or branched session copies its parent's history, message uuids included:
+        # the earliest transcript to start with a message is the original, later ones are forks.
+        first_seen = {}
+        for s in sorted((s for s in out if not s.get("parentID") and s["first_uuid"]), key=lambda s: s["time"]["created"]):
+            if s["first_uuid"] in first_seen and "fork" not in s:
+                s["fork"] = {"sessionID": first_seen[s["first_uuid"]]}
+            first_seen.setdefault(s["first_uuid"], s["id"])
+        return out
+
+    def messages(self, session_id: str):
+        if session_id not in self.paths:
+            self.sessions()
+        out, steps = [], {}
+        for r in read_jsonl(self.paths[session_id]):
+            t = r.get("type")
+            if r.get("isSidechain"):
+                continue
+            created = iso_ms(r.get("timestamp")) if r.get("timestamp") else None
+            if t == "user":
+                if r.get("isMeta") or r.get("isCompactSummary") or r.get("toolUseResult") is not None:
+                    continue
+                if (r.get("origin") or {}).get("kind") not in (None, "human"):
+                    continue
+                text, images = cc_text((r.get("message") or {}).get("content"))
+                self.add_user(out, text, images, created)
+            elif t == "attachment":
+                a = r.get("attachment") or {}
+                if a.get("type") == "queued_command" and (a.get("origin") or {}).get("kind", "human") == "human" and not a.get("isMeta"):
+                    # a message the person typed while the agent was busy, delivered mid-turn
+                    text, images = cc_text(a.get("prompt"))
+                    self.add_user(out, text, images, created)
+                elif a.get("type") in ("file", "image", "pdf") and out and out[-1]["type"] == "user":
+                    out[-1].setdefault("files", []).append({"name": a.get("displayPath") or a.get("filename")})
+            elif t == "assistant":
+                msg = r.get("message") or {}
+                if msg.get("model") == "<synthetic>":  # error notices Claude Code writes itself
+                    continue
+                key = msg.get("id") or r.get("uuid")
+                if key not in steps:
+                    steps[key] = {"type": "assistant", "time": {"created": created}, "model": {"providerID": "anthropic", "id": msg.get("model")}, "content": []}
+                    out.append(steps[key])
+                for b in msg.get("content") or []:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "text" and (b.get("text") or "").strip():
+                        steps[key]["content"].append({"type": "text", "text": b["text"]})
+                    elif b.get("type") == "tool_use" and b.get("name") not in CC_PLUMBING:
+                        name = b.get("name") or "?"
+                        steps[key]["content"].append({"type": "tool", "name": self.tool_name(name), "state": {"input": self.tool_input(name, b.get("input"))}})
+        return out
+
+    @staticmethod
+    def add_user(out, text, images, created):
+        text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text or "", flags=re.S)
+        text = re.sub(r"</?pasted_content[^>]*>", "", text).strip()
+        if not text and not images or CC_SYNTHETIC.match(text):
+            return
+        shell = re.match(r"^<bash-input>(.*)</bash-input>$", text, re.S)
+        if shell:  # the person ran a command with `!`
+            out.append({"type": "shell", "time": {"created": created}, "command": shell.group(1).strip()})
+            return
+        cmd = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
+        if cmd:  # a slash command: keep what the person typed, drop the expansion
+            name = cmd.group(1).strip()
+            if name in CC_UI_COMMANDS:
+                return
+            args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
+            text = f"{name} {args.group(1).strip() if args else ''}".strip()
+        msg = {"type": "user", "time": {"created": created}, "text": text}
+        if images:
+            msg["files"] = [{"name": "image"}] * images
+        out.append(msg)
+
+
+def open_claude_code():
+    root = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path.home() / ".claude").expanduser()
+    if not (root / "projects").is_dir():
+        sys.exit(f"error: no Claude Code transcripts found in {root / 'projects'} (set CLAUDE_CONFIG_DIR if they live elsewhere)")
+    return ClaudeCode(root)
+
+
 # Adapters by --harness id. A new harness adds an entry here; see SPEC.md.
-HARNESSES = {"opencode": open_opencode}
+HARNESSES = {"opencode": open_opencode, "claude-code": open_claude_code}
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +877,8 @@ def base_row(machine, session, children, opencode_version):
         cc = ct.get("cache") or {}
         child_total += sum(int(ct.get(k) or 0) for k in ("input", "output", "reasoning")) + int(cc.get("read") or 0) + int(cc.get("write") or 0)
         child_cost += float(c.get("cost") or 0)
+    # A harness that doesn't record cost leaves it None: store NULL (unknown), not 0.
+    cost_known = session.get("cost") is not None or any(c.get("cost") is not None for c in children)
     model = session.get("model") or {}
     return {
         "machine": machine,
@@ -620,7 +906,7 @@ def base_row(machine, session, children, opencode_version):
         "tokens_cache_read": cache.get("read"),
         "tokens_cache_write": cache.get("write"),
         "tokens_total": own_total + child_total,
-        "cost_usd": round(float(session.get("cost") or 0) + child_cost, 6),
+        "cost_usd": round(float(session.get("cost") or 0) + child_cost, 6) if cost_known else None,
         "opencode_version": opencode_version,
     }
 
