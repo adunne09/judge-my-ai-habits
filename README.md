@@ -43,6 +43,8 @@ Settings are kept in the URL, so a view can be bookmarked.
 
 ## How it works
 
+![How it works: read sessions from your harness, summarize each one, judge it with TypeSafe Jev, store it in SQLite, and see the change](charts/how-it-works.png)
+
 - **One scoring request per session.** A session's user messages, the agent's
   actions, its final reply, and a few computed facts about how the session ran
   (steps per message, active working time, subagents launched, other AI tools
