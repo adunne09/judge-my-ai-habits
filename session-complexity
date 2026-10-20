@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""Rate the complexity of every OpenCode v2 session on this machine with TypeSafe's Jev.
+
+Reads sessions through the local OpenCode service (`opencode api`), asks Jev how much
+work each session represents, and writes one row per session into a SQLite database
+that can be merged with databases from other machines.
+
+Standard library only. Requires Python 3.9+, OpenCode v2 on PATH, and TYPESAFE_API_KEY.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import math
+import os
+import pathlib
+import re
+import shutil
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+SCORER_VERSION = "1"
+DEFAULT_MODEL = "jev-1.13.0"
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+HOME = str(pathlib.Path.home())
+DEFAULT_DB = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share")) / "opencode-session-complexity" / "sessions.sqlite"
+
+# ---------------------------------------------------------------------------
+# Jev questions. Changing any of these changes SCORER_HASH, which rescores sessions.
+# ---------------------------------------------------------------------------
+
+EVIDENCE = "Judge from `user_messages` (what was asked) and `agent_actions` (the work that was actually needed to do it)."
+
+COMPLEXITY = {
+    "type": "score",
+    "instructions": {
+        "question": "How much work would it take a skilled professional, working without AI, to do everything the user asked for in this session?",
+        "evidence": EVIDENCE,
+        "focus": "Judge the size of the work requested, not the length of the conversation or how well the agent did.",
+    },
+    "criteria": [
+        {"what": "A couple of minutes", "examples": ["a greeting or test prompt", "asking whether a tool is available", "a how-to question with a well-known answer"]},
+        {"what": "Under an hour: one small, well-defined task", "examples": ["looking up one fact in a document or chat", "editing one config entry", "filing one ticket", "running and explaining one command"]},
+        {"what": "A few hours: a multi-step task", "examples": ["diagnosing and fixing a bug", "researching a question across several sources", "reviewing a set of documents and proposing edits", "coordinating a change across a few tools"]},
+        {"what": "About a full day: a substantial piece of work", "examples": ["building a working feature or small tool end to end", "a thorough research report with recommendations", "migrating content or data between systems", "a multi-step workflow across several services"]},
+        {"what": "Several days: a multi-part project", "examples": ["building a new tool or service with several components", "a research and writing project producing several deliverables", "a migration across several systems with testing and fixes"]},
+        {"what": "Weeks: a large project", "examples": ["building and launching a complete application with many features and revisions", "an ongoing program of work spanning many systems, people, and deliverables"]},
+    ],
+}
+
+DIMENSIONS = {
+    "scope": {
+        "type": "score",
+        "instructions": {"question": "How many distinct deliverables or goals does the user ask for across `user_messages`?", "focus": "Count separate outcomes the user wants, not the steps to get them."},
+        "criteria": [
+            "Nothing to deliver: a greeting, test, or yes/no question",
+            "One simple answer or one small change",
+            "One substantial deliverable, or two or three small ones",
+            "Several substantial deliverables or a multi-part project",
+        ],
+    },
+    "expertise": {
+        "type": "score",
+        "instructions": {"question": "How much specialized expertise does the work in this session require?", "focus": "Judge the knowledge needed to do the work in `user_messages` and `agent_actions`."},
+        "criteria": [
+            "None: anyone could do it",
+            "Basic computer or tool familiarity",
+            "Professional skill such as software engineering, systems administration, or domain research",
+            "Expert skill: debugging unfamiliar systems, designing software architecture, or deep domain analysis",
+        ],
+    },
+    "systems": {
+        "type": "score",
+        "instructions": {"question": "How many different external systems, services, or codebases does the work in `agent_actions` coordinate?", "focus": "Examples of systems: a git repository, Slack, Notion, Linear, Gmail, a web search, a deployed service, an LMS."},
+        "criteria": [
+            "None: answered without touching any system",
+            "One system",
+            "Two or three systems",
+            "Four or more systems combined in one workflow",
+        ],
+    },
+    "open_endedness": {
+        "type": "score",
+        "instructions": {"question": "How much does the agent have to figure out on its own to satisfy `user_messages`?", "focus": "Judge how open-ended the request is, not how hard it is."},
+        "criteria": [
+            "Exact instructions: the user specifies precisely what to do",
+            "Clear goal with an obvious approach",
+            "Clear goal, but the agent must investigate and choose an approach",
+            "Open-ended or exploratory: the agent must research, interpret the goal, and make design decisions",
+        ],
+    },
+}
+
+ORIGIN = {
+    "type": "choice",
+    "instructions": {
+        "question": "Who wrote `user_messages[0]`, and why?",
+        "focus": "Judge from the wording and content of the first message and the session title.",
+    },
+    "criteria": {
+        "personal_work": {"what": "A person typed a request about their own real work, projects, files, accounts, or questions", "signals": ["mentions specific people, projects, or their own files", "casual or conversational wording", "typos or dictation artifacts"]},
+        "scripted_job": {"what": "A program, scheduler, or launcher generated the prompt to run a recurring or templated job", "signals": ["long structured instructions written as a template", "describes the user in the third person", "dates or parameters filled into a fixed format"]},
+        "test_or_benchmark": {"what": "A test, evaluation, benchmark, or smoke check of the AI tool itself rather than real work", "signals": ["a canned task from an eval suite", "asks for an exact fixed reply", "a test or experiment label in the title"]},
+    },
+}
+
+QUESTIONS = {"complexity": COMPLEXITY, **DIMENSIONS, "origin": ORIGIN}
+
+# State size limits. Measured: a full state is ~1k-7k tokens, far below Jev's 32k per-question limit.
+TRACE_CAP = 80
+USER_MSG_CHARS = 2500
+USER_TOTAL_CHARS = 12000
+FINAL_REPLY_CHARS = 1800
+
+SCORER_HASH = hashlib.sha256(json.dumps([SCORER_VERSION, QUESTIONS, TRACE_CAP, USER_MSG_CHARS, USER_TOTAL_CHARS, FINAL_REPLY_CHARS], sort_keys=True).encode()).hexdigest()[:12]
+
+# ---------------------------------------------------------------------------
+# OpenCode access
+# ---------------------------------------------------------------------------
+
+
+def find_opencode() -> str:
+    found = shutil.which("opencode") or str(pathlib.Path.home() / ".opencode" / "bin" / "opencode")
+    if not os.path.exists(found):
+        sys.exit("error: could not find the `opencode` binary on PATH or in ~/.opencode/bin")
+    return found
+
+
+class OpenCode:
+    def __init__(self, binary: str):
+        self.binary = binary
+
+    def version(self) -> str:
+        return subprocess.run([self.binary, "--version"], capture_output=True, text=True).stdout.strip()
+
+    def get(self, path: str):
+        # Write to a file: `opencode api` can truncate large responses written to a pipe.
+        fd, tmp = tempfile.mkstemp(prefix="occ-", suffix=".json")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                proc = subprocess.run([self.binary, "api", "get", path], stdout=f, stderr=subprocess.PIPE)
+            if proc.returncode != 0:
+                raise RuntimeError(f"opencode api get {path} failed: {proc.stderr.decode(errors='replace')[:400]}")
+            with open(tmp, encoding="utf-8") as f:
+                return json.load(f)
+        finally:
+            os.unlink(tmp)
+
+    def paged(self, path: str, first_order: str = "asc"):
+        out, cursor = [], None
+        while True:
+            sep = "&" if "?" in path else "?"
+            page = self.get(f"{path}{sep}limit=200&" + (f"cursor={cursor}" if cursor else f"order={first_order}"))
+            out.extend(page.get("data") or [])
+            cursor = (page.get("cursor") or {}).get("next")
+            if not cursor or not page.get("data"):
+                return out
+
+    def sessions(self):
+        return self.paged("/api/session", first_order="desc")
+
+    def messages(self, session_id: str):
+        return self.paged(f"/api/session/{session_id}/message", first_order="asc")
+
+
+# ---------------------------------------------------------------------------
+# Building the state Jev sees, and deterministic metrics
+# ---------------------------------------------------------------------------
+
+
+def squash(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def clip(s, head, tail=0):
+    s = (s or "").strip()
+    if len(s) <= head + tail + 40:
+        return s
+    return s[:head] + f"\n[… {len(s) - head - tail} characters omitted …]\n" + (s[-tail:] if tail else "")
+
+
+def tidy(p):
+    return str(p).replace(HOME, "~")
+
+
+TOOL_REF = re.compile(r"tools(?:\.([A-Za-z_]\w*)|\[\"([\w-]+)\"\])(?:\.([A-Za-z_]\w*)|\[\"([\w-]+)\"\])?")
+EDIT_TOOLS = {"write", "edit", "patch", "multiedit", "apply_patch"}
+
+
+def describe_tool(part):
+    name = part.get("name") or "?"
+    inp = (part.get("state") or {}).get("input") or {}
+    if not isinstance(inp, dict):
+        return name
+    if name in ("shell", "bash"):
+        return f"shell: {squash(tidy(inp.get('command', '')), 140)}"
+    if name in ("read",) or name in EDIT_TOOLS:
+        return f"{name}: {tidy(inp.get('path') or inp.get('filePath') or '')}"
+    if name in ("glob", "grep"):
+        return f"{name}: {squash(inp.get('pattern', ''), 80)}"
+    if name == "execute":
+        code, calls = inp.get("code", ""), []
+        for m in TOOL_REF.finditer(code):
+            ns, fn = m.group(1) or m.group(2), m.group(3) or m.group(4)
+            key = f"{ns}.{fn}" if fn else ns
+            if key not in calls:
+                calls.append(key)
+        if not calls and "search(" in code:
+            calls.append("tool search")
+        return "execute: " + (", ".join(calls[:6]) if calls else squash(code, 100))
+    if name in ("subagent", "task"):
+        return f"subagent: {squash(inp.get('description') or inp.get('prompt', ''), 120)}"
+    if name == "webfetch":
+        return f"webfetch: {squash(inp.get('url', ''), 120)}"
+    if name == "websearch":
+        return f"websearch: {squash(inp.get('query', ''), 120)}"
+    if name == "skill":
+        return f"skill: {inp.get('id') or inp.get('name')}"
+    if name == "question":
+        return "asked user: " + squash("; ".join(q.get("question", "") for q in inp.get("questions") or []), 160)
+    for v in inp.values():
+        if isinstance(v, str) and v:
+            return f"{name}: {squash(v, 100)}"
+    return name
+
+
+def collapse(items):
+    out = []
+    for t in items:
+        if out and out[-1][0] == t:
+            out[-1][1] += 1
+        else:
+            out.append([t, 1])
+    return [t if n == 1 else f"{t} (×{n})" for t, n in out]
+
+
+def sample_evenly(items, cap):
+    if len(items) <= cap:
+        return items
+    head, tail = cap // 2, cap // 4
+    middle = items[head : len(items) - tail]
+    k = cap - head - tail
+    step = len(middle) / k
+    return items[:head] + [f"[… {len(items) - cap} more steps omitted …]"] + [middle[int(i * step)] for i in range(k)] + items[len(items) - tail :]
+
+
+def cap_user_messages(users):
+    size = lambda xs: sum(len(u["text"]) for u in xs)  # noqa: E731
+    if size(users) <= USER_TOTAL_CHARS or len(users) <= 2:
+        return users
+    first, last, middle = users[0], users[-1], users[1:-1]
+    front, back = [], []
+    budget = USER_TOTAL_CHARS - size([first, last])
+    while middle:
+        take_front = len(front) <= len(back)
+        u = middle[0] if take_front else middle[-1]
+        if budget - len(u["text"]) < 0:
+            break
+        budget -= len(u["text"])
+        if take_front:
+            front.append(middle.pop(0))
+        else:
+            back.insert(0, middle.pop())
+    gap = [{"text": f"[{len(middle)} follow-up messages omitted]"}] if middle else []
+    return [first] + front + gap + back + [last]
+
+
+def analyze(session, messages):
+    """Return (state for Jev, deterministic metrics)."""
+    users, trace, tools, files = [], [], [], set()
+    final_reply, assistant_count, active_ms = "", 0, 0.0
+    first_ms, last_ms = None, None
+    models = set()
+    for m in messages:
+        t = m.get("type")
+        created = (m.get("time") or {}).get("created")
+        if created:
+            first_ms = created if first_ms is None else min(first_ms, created)
+            last_ms = created if last_ms is None else max(last_ms, created)
+        if t == "user":
+            entry = {"text": clip(m.get("text") or "", int(USER_MSG_CHARS * 0.8), int(USER_MSG_CHARS * 0.2))}
+            extra = []
+            if m.get("files"):
+                extra.append(f"{len(m['files'])} attached file(s)")
+            if m.get("skills"):
+                extra.append("skills: " + ", ".join(str(s.get("name") or s.get("id") or "?") for s in m["skills"]))
+            if extra:
+                entry["attachments"] = "; ".join(extra)
+            if users:
+                trace.append("— user sent a new message —")
+            users.append(entry)
+        elif t == "assistant":
+            assistant_count += 1
+            mt = m.get("time") or {}
+            if mt.get("completed") and mt.get("created"):
+                active_ms += max(0, mt["completed"] - mt["created"])
+            model = m.get("model") or {}
+            if model.get("id"):
+                models.add(f"{model.get('providerID', '?')}/{model['id']}")
+            for part in m.get("content") or []:
+                if part.get("type") == "tool":
+                    tools.append(part.get("name") or "?")
+                    trace.append(describe_tool(part))
+                    if part.get("name") in EDIT_TOOLS:
+                        inp = (part.get("state") or {}).get("input") or {}
+                        if isinstance(inp, dict) and (inp.get("path") or inp.get("filePath")):
+                            files.add(inp.get("path") or inp.get("filePath"))
+                elif part.get("type") == "text" and (part.get("text") or "").strip():
+                    final_reply = part["text"]
+        elif t == "shell":
+            trace.append(f"user ran shell: {squash(m.get('command') or m.get('text') or '', 120)}")
+
+    state = {
+        "session_title": session.get("title") or "(untitled)",
+        "user_messages": cap_user_messages(users),
+        "agent_actions": sample_evenly(collapse(trace), TRACE_CAP),
+        "agent_final_reply": clip(final_reply, int(FINAL_REPLY_CHARS * 0.8), int(FINAL_REPLY_CHARS * 0.2)) if final_reply else "(no reply)",
+    }
+    metrics = {
+        "user_messages": len(users),
+        "assistant_messages": assistant_count,
+        "tool_calls": len(tools),
+        "distinct_tools": len(set(tools)),
+        "subagent_calls": sum(1 for x in tools if x in ("subagent", "task")),
+        "files_edited": len(files),
+        "active_seconds": round(active_ms / 1000, 1),
+        "wall_seconds": round((last_ms - first_ms) / 1000, 1) if first_ms and last_ms else 0,
+        "models_used": ",".join(sorted(models)),
+    }
+    return state, metrics
+
+
+# ---------------------------------------------------------------------------
+# TypeSafe
+# ---------------------------------------------------------------------------
+
+
+class Jev:
+    def __init__(self, api_key: str, model: str):
+        self.api_key, self.model = api_key, model
+
+    def ask(self, state, questions):
+        body = json.dumps({"model": self.model, "state": state, "questions": questions}).encode()
+        delay = 1.0
+        for attempt in range(7):
+            req = urllib.request.Request(TYPESAFE_URL, data=body, method="POST", headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": f"opencode-session-complexity/{SCORER_VERSION}",
+            })
+            try:
+                with urllib.request.urlopen(req, timeout=90) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode(errors="replace")[:500]
+                if e.code in (408, 429, 500, 502, 503, 504, 529) and attempt < 6:
+                    retry_after = e.headers.get("retry-after")
+                    time.sleep(float(retry_after) if retry_after and retry_after.replace(".", "").isdigit() else delay)
+                    delay = min(delay * 2, 30)
+                    continue
+                raise RuntimeError(f"TypeSafe HTTP {e.code}: {detail}")
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if attempt < 6:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                    continue
+                raise RuntimeError(f"TypeSafe connection error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+  machine TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  title TEXT,
+  directory TEXT,
+  project_id TEXT,
+  agent TEXT,
+  model TEXT,
+  models_used TEXT,
+  fork_of TEXT,
+  launched_by_program INTEGER, -- 1 when OpenCode recorded a launcher source or per-session permission rules (API/scripted sessions)
+  launch_source TEXT,
+  created_at TEXT,            -- ISO 8601 UTC
+  created_ms INTEGER,
+  updated_ms INTEGER,
+  day TEXT,                   -- YYYY-MM-DD, local time of the machine that ran the script
+  week TEXT,                  -- ISO week, e.g. 2026-W42
+  month TEXT,                 -- YYYY-MM
+  outcome TEXT,
+  user_messages INTEGER,
+  assistant_messages INTEGER,
+  tool_calls INTEGER,
+  distinct_tools INTEGER,
+  subagent_calls INTEGER,
+  subagent_sessions INTEGER,
+  files_edited INTEGER,
+  active_seconds REAL,
+  wall_seconds REAL,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  tokens_reasoning INTEGER,
+  tokens_cache_read INTEGER,
+  tokens_cache_write INTEGER,
+  tokens_total INTEGER,       -- this session plus its subagent sessions
+  cost_usd REAL,              -- this session plus its subagent sessions
+  status TEXT NOT NULL,       -- scored | empty | error
+  error TEXT,
+  origin TEXT,                -- personal_work | scripted_job | test_or_benchmark
+  origin_p_personal REAL,
+  origin_p_scripted REAL,
+  origin_p_test REAL,
+  complexity REAL,            -- 0..5, see README for the levels
+  complexity_confidence REAL,
+  complexity_p0 REAL, complexity_p1 REAL, complexity_p2 REAL,
+  complexity_p3 REAL, complexity_p4 REAL, complexity_p5 REAL,
+  scope REAL,                 -- 0..3
+  expertise REAL,             -- 0..3
+  systems REAL,               -- 0..3
+  open_endedness REAL,        -- 0..3
+  answers_json TEXT,          -- full Jev answers, for recomputing anything later
+  jev_model TEXT,             -- versioned model that answered, e.g. jev-1.13.0
+  scorer_hash TEXT,
+  state_tokens INTEGER,
+  scored_at TEXT,
+  opencode_version TEXT,
+  PRIMARY KEY (machine, session_id)
+);
+CREATE INDEX IF NOT EXISTS sessions_created ON sessions(created_ms);
+CREATE VIEW IF NOT EXISTS human_sessions AS
+  SELECT * FROM sessions
+  WHERE status = 'scored' AND origin = 'personal_work' AND fork_of IS NULL AND launched_by_program = 0;
+CREATE TABLE IF NOT EXISTS runs (
+  machine TEXT, started_at TEXT, finished_at TEXT, opencode_version TEXT,
+  jev_model TEXT, scorer_hash TEXT, sessions_seen INTEGER, sessions_scored INTEGER,
+  errors INTEGER, jev_input_tokens INTEGER
+);
+"""
+
+COLUMNS = [
+    "machine", "session_id", "title", "directory", "project_id", "agent", "model", "models_used", "fork_of", "launched_by_program", "launch_source",
+    "created_at", "created_ms", "updated_ms", "day", "week", "month", "outcome",
+    "user_messages", "assistant_messages", "tool_calls", "distinct_tools", "subagent_calls", "subagent_sessions",
+    "files_edited", "active_seconds", "wall_seconds",
+    "tokens_input", "tokens_output", "tokens_reasoning", "tokens_cache_read", "tokens_cache_write", "tokens_total", "cost_usd",
+    "status", "error", "origin", "origin_p_personal", "origin_p_scripted", "origin_p_test",
+    "complexity", "complexity_confidence",
+    "complexity_p0", "complexity_p1", "complexity_p2", "complexity_p3", "complexity_p4", "complexity_p5",
+    "scope", "expertise", "systems", "open_endedness", "answers_json",
+    "jev_model", "scorer_hash", "state_tokens", "scored_at", "opencode_version",
+]
+
+
+def connect(path: pathlib.Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), check_same_thread=False)
+    db.executescript(SCHEMA)
+    return db
+
+
+def upsert(db, row):
+    db.execute(
+        f"INSERT OR REPLACE INTO sessions ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})",
+        [row.get(c) for c in COLUMNS],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def base_row(machine, session, children, opencode_version):
+    created = (session.get("time") or {}).get("created") or 0
+    local = dt.datetime.fromtimestamp(created / 1000)
+    iso = local.isocalendar()
+    tok = session.get("tokens") or {}
+    cache = tok.get("cache") or {}
+    own_total = sum(int(tok.get(k) or 0) for k in ("input", "output", "reasoning")) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+    child_total, child_cost = 0, 0.0
+    for c in children:
+        ct = c.get("tokens") or {}
+        cc = ct.get("cache") or {}
+        child_total += sum(int(ct.get(k) or 0) for k in ("input", "output", "reasoning")) + int(cc.get("read") or 0) + int(cc.get("write") or 0)
+        child_cost += float(c.get("cost") or 0)
+    model = session.get("model") or {}
+    return {
+        "machine": machine,
+        "session_id": session["id"],
+        "title": session.get("title"),
+        "directory": tidy((session.get("location") or {}).get("directory") or ""),
+        "project_id": session.get("projectID"),
+        "agent": session.get("agent"),
+        "model": f"{model.get('providerID')}/{model.get('id')}" if model.get("id") else None,
+        "fork_of": (session.get("fork") or {}).get("sessionID"),
+        "launched_by_program": int(bool((session.get("metadata") or {}).get("source") or session.get("permissions"))),
+        "launch_source": (session.get("metadata") or {}).get("source"),
+        "created_at": dt.datetime.fromtimestamp(created / 1000, dt.timezone.utc).isoformat(timespec="seconds"),
+        "created_ms": created,
+        "updated_ms": (session.get("time") or {}).get("updated"),
+        "day": local.strftime("%Y-%m-%d"),
+        "week": f"{iso[0]}-W{iso[1]:02d}",
+        "month": local.strftime("%Y-%m"),
+        "outcome": session.get("outcome"),
+        "subagent_sessions": len(children),
+        "tokens_input": tok.get("input"),
+        "tokens_output": tok.get("output"),
+        "tokens_reasoning": tok.get("reasoning"),
+        "tokens_cache_read": cache.get("read"),
+        "tokens_cache_write": cache.get("write"),
+        "tokens_total": own_total + child_total,
+        "cost_usd": round(float(session.get("cost") or 0) + child_cost, 6),
+        "opencode_version": opencode_version,
+    }
+
+
+def score_one(oc, jev, machine, session, children, opencode_version):
+    row = base_row(machine, session, children, opencode_version)
+    row["scorer_hash"], row["scored_at"] = SCORER_HASH, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    try:
+        state, metrics = analyze(session, oc.messages(session["id"]))
+        row.update(metrics)
+        if metrics["user_messages"] == 0 or metrics["assistant_messages"] == 0:
+            row["status"] = "empty"
+            return row, 0
+        resp = jev.ask(state, QUESTIONS)
+        a = resp["answers"]
+        cx = a["complexity"]
+        probs = {int(k): v for k, v in cx["probabilities"].items()}
+        org = a["origin"]["probabilities"]
+        row.update({
+            "status": "scored",
+            "complexity": cx["score"],
+            "complexity_confidence": cx["confidence"],
+            **{f"complexity_p{i}": probs.get(i) for i in range(6)},
+            **{k: a[k]["score"] for k in DIMENSIONS},
+            "origin": a["origin"]["choice"],
+            "origin_p_personal": org.get("personal_work"),
+            "origin_p_scripted": org.get("scripted_job"),
+            "origin_p_test": org.get("test_or_benchmark"),
+            "answers_json": json.dumps({k: {kk: vv for kk, vv in v.items() if kk != "legend"} for k, v in a.items()}),
+            "jev_model": resp.get("model"),
+            "state_tokens": (resp.get("usage") or {}).get("input_tokens"),
+        })
+        return row, row["state_tokens"] or 0
+    except Exception as e:  # keep going; the row records the failure and is retried next run
+        row["status"], row["error"] = "error", str(e)[:1000]
+        return row, 0
+
+
+def cmd_score(args):
+    api_key = os.environ.get("TYPESAFE_API_KEY")
+    if not api_key and not args.dry_run:
+        sys.exit("error: set TYPESAFE_API_KEY (get one at https://console.typesafe.ai)")
+    oc = OpenCode(find_opencode())
+    version = oc.version()
+    if not re.search(r"\bv?2\.", version):
+        print(f"warning: expected OpenCode v2, found {version!r}", file=sys.stderr)
+    machine = args.machine or socket.gethostname().split(".")[0]
+    db = connect(pathlib.Path(args.db).expanduser())
+    jev = Jev(api_key or "", args.model)
+
+    print(f"machine={machine} opencode={version} model={args.model} scorer={SCORER_HASH} db={args.db}", file=sys.stderr)
+    all_sessions = oc.sessions()
+    children = {}
+    for s in all_sessions:
+        if s.get("parentID"):
+            children.setdefault(s["parentID"], []).append(s)
+    roots = [s for s in all_sessions if not s.get("parentID")]
+    if args.since:
+        cutoff = dt.datetime.fromisoformat(args.since).timestamp() * 1000
+        roots = [s for s in roots if (s.get("time") or {}).get("created", 0) >= cutoff]
+    if args.session:
+        roots = [s for s in roots if s["id"] in set(args.session)]
+
+    done = {}
+    for sid, updated, status, scorer, model in db.execute("SELECT session_id, updated_ms, status, scorer_hash, jev_model FROM sessions WHERE machine = ?", (machine,)):
+        done[sid] = (updated, status, scorer, model)
+
+    def stale(s):
+        prev = done.get(s["id"])
+        if args.rescore or prev is None:
+            return True
+        updated, status, scorer, _ = prev
+        return status == "error" or scorer != SCORER_HASH or updated != (s.get("time") or {}).get("updated")
+
+    todo = [s for s in roots if stale(s)]
+    todo.sort(key=lambda s: -((s.get("time") or {}).get("created") or 0))
+    if args.limit:
+        todo = todo[: args.limit]
+    print(f"{len(all_sessions)} sessions ({len(roots)} top-level); {len(todo)} to score", file=sys.stderr)
+
+    if args.dry_run:
+        for s in todo[: args.limit or 3]:
+            state, metrics = analyze(s, oc.messages(s["id"]))
+            print(json.dumps({"session_id": s["id"], "metrics": metrics, "state": state}, indent=2, ensure_ascii=False))
+        return
+
+    started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    lock = threading.Lock()
+    counts = {"scored": 0, "empty": 0, "error": 0}
+    tokens = 0
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = [pool.submit(score_one, oc, jev, machine, s, children.get(s["id"], []), version) for s in todo]
+        for i, fut in enumerate(as_completed(futures), 1):
+            row, used = fut.result()
+            with lock:
+                upsert(db, row)
+                counts[row["status"]] += 1
+                tokens += used
+                if i % 25 == 0 or i == len(futures):
+                    db.commit()
+                    print(f"  {i}/{len(futures)}  scored={counts['scored']} empty={counts['empty']} errors={counts['error']}  {time.time() - t0:.0f}s", file=sys.stderr)
+                if row["status"] == "error":
+                    print(f"  error {row['session_id']}: {row['error'][:200]}", file=sys.stderr)
+    db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)", (machine, started, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), version, args.model, SCORER_HASH, len(roots), counts["scored"], counts["error"], tokens))
+    db.commit()
+    print(f"done: {counts}; Jev input tokens {tokens:,} (~${tokens * 0.042 / 1e6:.4f})", file=sys.stderr)
+    print(f"database: {pathlib.Path(args.db).expanduser()}", file=sys.stderr)
+
+
+def cmd_merge(args):
+    out = connect(pathlib.Path(args.output).expanduser())
+    for src in args.inputs:
+        out.execute("ATTACH DATABASE ? AS src", (str(pathlib.Path(src).expanduser()),))
+        n = out.execute(f"INSERT OR REPLACE INTO sessions ({','.join(COLUMNS)}) SELECT {','.join(COLUMNS)} FROM src.sessions").rowcount
+        try:
+            out.execute("INSERT INTO runs SELECT * FROM src.runs")
+        except sqlite3.OperationalError:
+            pass
+        out.commit()
+        out.execute("DETACH DATABASE src")
+        print(f"merged {n} rows from {src}", file=sys.stderr)
+    hashes = out.execute("SELECT scorer_hash, jev_model, COUNT(*) FROM sessions WHERE status='scored' GROUP BY 1, 2").fetchall()
+    if len(hashes) > 1:
+        print("warning: rows were scored with different question sets or models; compare like with like:", file=sys.stderr)
+        for h in hashes:
+            print(f"  scorer={h[0]} model={h[1]} rows={h[2]}", file=sys.stderr)
+
+
+def cmd_report(args):
+    db = sqlite3.connect(str(pathlib.Path(args.db).expanduser()))
+    table = "sessions WHERE status='scored'" if args.all else "human_sessions WHERE 1=1"
+    period = {"month": "month", "week": "week", "day": "day"}[args.by]
+    rows = db.execute(f"SELECT {period}, complexity FROM {table} ORDER BY created_ms").fetchall()
+    if not rows:
+        print("no scored sessions")
+        return
+    values = [r[1] for r in rows]
+
+    def stats(xs):
+        n = len(xs)
+        mean = sum(xs) / n
+        sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / (n - 1)) if n > 1 else 0.0
+        med = sorted(xs)[n // 2]
+        return n, mean, sd, med
+
+    n, mean, sd, med = stats(values)
+    print(f"\nComplexity of {'all scored' if args.all else 'personal (non-test, non-fork)'} sessions: n={n} mean={mean:.2f} sd={sd:.2f} median={med:.2f}")
+    print("levels: 0 minutes · 1 <1h · 2 few hours · 3 a day · 4 several days · 5 weeks\n")
+    bins = [0] * 20
+    for v in values:
+        bins[min(19, int(v / 0.25))] += 1
+    top = max(bins)
+    for i, c in enumerate(bins):
+        print(f"  {i * 0.25:4.2f}-{(i + 1) * 0.25:4.2f} | {'█' * round(40 * c / top):<40} {c}")
+    print(f"\nBy {args.by}:")
+    groups = {}
+    for p, v in rows:
+        groups.setdefault(p, []).append(v)
+    for p, xs in groups.items():
+        n, mean, sd, med = stats(xs)
+        print(f"  {p}  n={n:4d}  mean={mean:.2f}  sd={sd:.2f}  median={med:.2f}  {'▇' * round(mean * 8)}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd")
+    s = sub.add_parser("score", help="score sessions on this machine (default)")
+    s.add_argument("--db", default=str(DEFAULT_DB), help=f"SQLite output (default {DEFAULT_DB})")
+    s.add_argument("--machine", help="machine label stored with each row (default: short hostname)")
+    s.add_argument("--model", default=DEFAULT_MODEL, help=f"Jev model; pinned so scores stay comparable over time (default {DEFAULT_MODEL})")
+    s.add_argument("--workers", type=int, default=6)
+    s.add_argument("--since", help="only sessions created on or after this date (YYYY-MM-DD)")
+    s.add_argument("--limit", type=int, help="score at most N sessions (newest first)")
+    s.add_argument("--session", action="append", help="score only this session id (repeatable)")
+    s.add_argument("--rescore", action="store_true", help="rescore sessions even if unchanged")
+    s.add_argument("--dry-run", action="store_true", help="print the state Jev would see, without calling Jev")
+    m = sub.add_parser("merge", help="merge databases from several machines into one")
+    m.add_argument("inputs", nargs="+")
+    m.add_argument("-o", "--output", required=True)
+    r = sub.add_parser("report", help="print the distribution and its trend")
+    r.add_argument("--db", default=str(DEFAULT_DB))
+    r.add_argument("--by", choices=["month", "week", "day"], default="month")
+    r.add_argument("--all", action="store_true", help="include tests, scripted jobs, and forks")
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in ("score", "merge", "report", "-h", "--help"):
+        argv = ["score"] + argv
+    args = p.parse_args(argv)
+    {"score": cmd_score, "merge": cmd_merge, "report": cmd_report}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()
