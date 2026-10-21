@@ -137,6 +137,39 @@ select:focus, input:focus { border-color: var(--line2); }
 .bin:hover { opacity: 1 !important; }
 .dot { cursor: pointer; transition: r .15s; }
 
+/* TL;DR + complexity explainer */
+.tldr-list { margin: 2px 0 0; padding: 0; list-style: none; }
+.tldr-list li { position: relative; padding: 10px 0 10px 26px; font-size: 13.5px; line-height: 1.55; color: var(--ink2); border-bottom: 1px solid rgba(255,255,255,0.045); }
+.tldr-list li:last-child { border-bottom: 0; padding-bottom: 4px; }
+.tldr-list li::before { content: ""; position: absolute; left: 4px; top: 17px; width: 8px; height: 8px; border-radius: 3px; background: linear-gradient(135deg, var(--recent), var(--recent2)); }
+.tldr-list b { color: var(--ink); font-weight: 600; }
+.cxq { font-size: 13.5px; color: var(--ink); line-height: 1.55; margin: 0 0 12px; }
+.cxq em { color: var(--recent); font-style: normal; }
+.cxbar { position: relative; height: 7px; border-radius: 4px; margin: 30px 0 16px; background: linear-gradient(90deg, rgba(94,234,212,.5), rgba(34,211,238,.3) 45%, rgba(167,139,250,.55)); }
+.cxbar span { position: absolute; top: -5px; width: 3px; height: 17px; border-radius: 2px; background: #fff; box-shadow: 0 0 10px rgba(255,255,255,.7); transition: left .4s cubic-bezier(.2,.8,.2,1); }
+.cxbar .cxlbl { position: absolute; top: -22px; width: auto; height: auto; background: none; box-shadow: none; font: 600 10.5px var(--mono); color: var(--ink2); white-space: nowrap; transform: translateX(-50%); }
+.cxscale { display: grid; gap: 5px; }
+.cxstep { display: grid; grid-template-columns: 20px 138px 1fr; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.cxstep .n { font: 600 11px var(--mono); color: var(--ink3); text-align: right; }
+.cxstep .nm { color: var(--ink); font-weight: 500; white-space: nowrap; }
+.cxstep .d { color: var(--ink3); line-height: 1.45; }
+.cxnote { font-size: 11.5px; color: var(--ink3); margin-top: 14px; line-height: 1.55; }
+.cxnote b { color: var(--ink2); font-weight: 600; }
+
+/* tokens vs requests */
+.finding { font-size: 13.5px; line-height: 1.6; color: var(--ink2); margin: 2px 0 16px; max-width: 900px; }
+.finding b { color: var(--ink); font-weight: 600; }
+.tokgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
+.tokchart h6 { margin: 0 0 10px; font: 500 10.5px var(--mono); text-transform: uppercase; letter-spacing: .12em; color: var(--ink3); }
+.hbar { display: grid; grid-template-columns: 108px 1fr 108px; gap: 12px; align-items: center; margin: 8px 0; }
+.hbar .lb { font-size: 12.5px; color: var(--ink); font-weight: 500; }
+.hbar .lb small { display: block; color: var(--ink3); font-size: 10.5px; font-weight: 400; font-family: var(--mono); margin-top: 1px; }
+.hbar .tr { position: relative; height: 15px; border-radius: 4px; background: rgba(255,255,255,0.045); overflow: hidden; }
+.hbar .tr i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: linear-gradient(90deg, var(--base2), var(--recent)); }
+.hbar .v { font: 500 11.5px var(--mono); color: var(--ink2); white-space: nowrap; }
+.hbar .v small { display: block; color: var(--ink3); font-size: 10px; margin-top: 1px; }
+.toknote { font-size: 11.5px; color: var(--ink3); margin-top: 14px; line-height: 1.5; }
+
 .sessions { padding: 18px; }
 .tbl-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .filter-chip { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink); padding: 5px 6px 5px 11px; border-radius: 999px;
@@ -199,7 +232,7 @@ footer { margin-top: 30px; font: 11px var(--mono); color: var(--ink3); line-heig
 .dot:hover { stroke-width: 2.5; fill-opacity: .9; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .fade, .draw { animation: none !important; } * { transition: none !important; } }
-@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } .grid2 { grid-template-columns: 1fr; } .hero { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } .grid2 { grid-template-columns: 1fr; } .hero { grid-template-columns: 1fr; } .tokgrid { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .stand { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { td.title { min-width: 220px; } .hero h2 { font-size: 24px; } .kpis { grid-template-columns: 1fr 1fr; } .wrap { padding: 18px; } .controls { margin: 0 -18px 18px; padding: 10px 18px; } }
 </style>
@@ -220,6 +253,28 @@ footer { margin-top: 30px; font: 11px var(--mono); color: var(--ink3); line-heig
     <div class="card shift" id="shift"></div>
   </section>
 
+  <div class="grid2" style="grid-template-columns:1.15fr 1fr; margin-bottom:14px">
+    <div class="card panel">
+      <div class="panel-head"><div><h3>TL;DR — what this page tells you</h3><p>The four things worth knowing, in plain language. Updates with the filters below.</p></div></div>
+      <ul class="tldr-list" id="tldr"></ul>
+    </div>
+    <div class="card panel">
+      <div class="panel-head"><div><h3>What is “complexity”?</h3><p>The 0–6 scale every session is scored on.</p></div></div>
+      <p class="cxq">Complexity asks: <em>how much work would it take skilled professionals, working without AI, to do everything you asked for in this session?</em></p>
+      <div class="cxbar" id="cxbar"><span class="cxlbl" id="cxlbl">your sessions</span><span id="cxmark"></span></div>
+      <div class="cxscale">
+        <div class="cxstep"><span class="n">0</span><span class="nm">a couple of minutes</span><span class="d">a quick question, answered on the spot</span></div>
+        <div class="cxstep"><span class="n">1</span><span class="nm">under an hour</span><span class="d">a small task one person finishes quickly</span></div>
+        <div class="cxstep"><span class="n">2</span><span class="nm">a few hours</span><span class="d">a focused chunk of real work</span></div>
+        <div class="cxstep"><span class="n">3</span><span class="nm">about a day</span><span class="d">a full day of skilled work</span></div>
+        <div class="cxstep"><span class="n">4</span><span class="nm">several days</span><span class="d">a small project, days rather than hours</span></div>
+        <div class="cxstep"><span class="n">5</span><span class="nm">weeks for one person</span><span class="d">weeks of full-time work for one skilled person</span></div>
+        <div class="cxstep"><span class="n">6</span><span class="nm">months for a team</span><span class="d">what a team of specialists would need months to build</span></div>
+      </div>
+      <div class="cxnote" id="cxnote">A session's score is a weighted average across these levels, so <b>1.84</b> means “between level 1 and level 2”. The companion score, <b>leverage</b> (0–5), asks a different question: <em>how did you put the AI to work</em> — from answering from memory up to running an autonomous agent loop.</div>
+    </div>
+  </div>
+
   <div class="controls">
     <div class="ctl"><label>Sessions</label><div class="seg" data-key="set"><button data-v="personal">Personal</button><button data-v="all">All</button></div></div>
     <div class="ctl"><label>Period</label><div class="seg" data-key="range"><button data-v="all">All time</button><button data-v="365">1y</button><button data-v="180">6m</button><button data-v="90">3m</button><button data-v="custom">Custom</button></div>
@@ -236,7 +291,7 @@ footer { margin-top: 30px; font: 11px var(--mono); color: var(--ink3); line-heig
   <div class="grid2">
     <div class="card panel">
       <div class="panel-head">
-        <div><h3>The curve</h3><p id="curve-desc"></p></div>
+        <div><h3 id="curve-h">How hard is the work?</h3><p id="curve-desc"></p></div>
         <div class="seg" data-key="dist"><button data-v="c">Complexity</button><button data-v="l">Leverage</button></div>
       </div>
       <div class="chart" id="curve"></div>
@@ -244,11 +299,23 @@ footer { margin-top: 30px; font: 11px var(--mono); color: var(--ink3); line-heig
     </div>
     <div class="card panel">
       <div class="panel-head">
-        <div><h3>Size × delegation</h3><p>Every session: how big the work was, and how it was handed to the agent. Dot size is tokens.</p></div>
+        <div><h3>Size vs delegation</h3><p>Each dot is one session: how big the work was (across), how much you delegated (up), dot size is tokens. Click a dot for details.</p></div>
       </div>
       <div class="chart" id="scatter"></div>
       <div class="legend"><span style="--c: var(--recent)">recent</span><span style="--c: var(--base)">baseline</span><span style="--c: #3b4050">earlier</span></div>
     </div>
+  </div>
+
+  <div class="card panel" style="margin-bottom:14px">
+    <div class="panel-head">
+      <div><h3>More requests, more tokens?</h3><p id="tok-sub">“Requests” here means a session's tool calls — every action the agent took. Bars are on a log scale so small and huge sessions fit side by side.</p></div>
+    </div>
+    <p class="finding" id="tok-find"></p>
+    <div class="tokgrid">
+      <div class="tokchart"><h6>Median tokens per session, by complexity</h6><div id="tokA"></div></div>
+      <div class="tokchart"><h6>Median tokens per tool call, by complexity</h6><div id="tokB"></div></div>
+    </div>
+    <div class="toknote">Medians, so one giant session can't skew a bucket. Correlations describe this data — they don't prove cause. Token totals include subagent sessions.</div>
   </div>
 
   <div class="card panel" style="margin-bottom:14px">
@@ -397,6 +464,87 @@ function kde(vals, lo, hi, bw, pts = 180) {
   }
   return out;
 }
+function pearson(pairs) {
+  const n = pairs.length;
+  if (n < 10) return null;
+  const mx = sum(pairs.map((p) => p[0])) / n, my = sum(pairs.map((p) => p[1])) / n;
+  let cov = 0, sx = 0, sy = 0;
+  for (const [x, y] of pairs) { cov += (x - mx) * (y - my); sx += (x - mx) ** 2; sy += (y - my) ** 2; }
+  return sx > 0 && sy > 0 ? cov / Math.sqrt(sx * sy) : null;
+}
+const TK_BUCKETS = [
+  { name: "0–1", gloss: "quick asks", test: (c) => c < 2 },
+  { name: "2", gloss: "a few hours", test: (c) => c >= 2 && c < 3 },
+  { name: "3", gloss: "about a day", test: (c) => c >= 3 && c < 4 },
+  { name: "4+", gloss: "days or more", test: (c) => c >= 4 },
+];
+const med = (a) => (a.length ? a[Math.floor(a.length / 2)] : null);
+function hbars(el, rows) {
+  const vals = rows.filter((r) => r.v > 0).map((r) => r.v);
+  if (!vals.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const lo = Math.log10(Math.min(...vals) * 0.6), hi = Math.log10(Math.max(...vals) * 1.3);
+  el.innerHTML = rows.map((r) => {
+    const w = r.v > 0 ? Math.max(1.5, (Math.log10(r.v) - lo) / (hi - lo) * 100) : 0;
+    return `<div class="hbar"><span class="lb">${r.name}<small>${r.gloss}</small></span><span class="tr"><i style="width:${w.toFixed(1)}%"></i></span><span class="v">${r.v > 0 ? tok(r.v) : "—"}<small>${r.sub}</small></span></div>`;
+  }).join("");
+}
+function renderTokens() {
+  ctx.tok = null;
+  const xs = ctx.xs.filter((s) => s.k != null);
+  const find = $("tok-find");
+  if (xs.length < 12) { find.textContent = "Not enough scored sessions in this view to answer this yet — widen the filters above."; $("tokA").innerHTML = ""; $("tokB").innerHTML = ""; return; }
+  const rowsA = [], rowsB = [];
+  for (const b of TK_BUCKETS) {
+    const g = xs.filter((s) => b.test(s.c));
+    const gc = g.filter((s) => s.tc > 0);
+    const small = g.length < 10 ? " · small sample" : "";
+    rowsA.push({ name: b.name, gloss: b.gloss + small, v: med(g.map((s) => s.k).sort((a, b2) => a - b2)) || 0, sub: `${g.length} session${g.length === 1 ? "" : "s"}` });
+    rowsB.push({ name: b.name, gloss: b.gloss + small, v: med(gc.map((s) => s.k / s.tc).sort((a, b2) => a - b2)) || 0,
+      sub: gc.length ? `median ${Math.round(med(gc.map((s) => s.tc).sort((a, b2) => a - b2)))} calls` : "no tool calls" });
+  }
+  hbars($("tokA"), rowsA); hbars($("tokB"), rowsB);
+  const rTC = pearson(xs.filter((s) => s.tc > 0).map((s) => [s.tc, s.k]));
+  const rUM = pearson(xs.filter((s) => s.um > 0).map((s) => [s.um, s.k]));
+  let txt = "";
+  if (rTC != null) {
+    txt += `Broadly, yes: busier sessions do use more tokens. A session's <b>tool calls</b> track its token use closely (r ≈ ${rTC.toFixed(2)}), while the number of <b>your messages</b> tracks it more loosely${rUM != null ? ` (r ≈ ${rUM.toFixed(2)})` : ""} — the agent's own actions drive the bill more than how often you ping it.`;
+  } else txt += "Not enough sessions with tool-call data in this view to measure the relationship.";
+  const lo = rowsB[0].v, hi = rowsB[rowsB.length - 1].v;
+  if (lo > 0 && hi > 0 && hi / lo >= 1.5) {
+    txt += ` And requests aren't equal: median tokens per tool call climb steadily with complexity (${rowsB.map((r) => (r.v > 0 ? tok(r.v) : "—")).join(" → ")}). Heavier work doesn't just take more steps — each step thinks harder.`;
+  }
+  find.innerHTML = txt;
+  ctx.tok = { rTC, rUM, ratio: lo > 0 && hi > 0 ? hi / lo : null };
+}
+function renderTldr() {
+  const { xs, w, R, B } = ctx, el = $("tldr");
+  if (!xs.length || !R) { el.innerHTML = '<li>No sessions in this view yet.</li>'; return; }
+  const label = state.set === "personal" ? "personal sessions" : "sessions";
+  const lvl = Math.min(6, Math.max(0, Math.round(R.c.mean)));
+  const b1 = `<b>${xs.length.toLocaleString()} ${label}</b> from ${fmtDate(xs[0].t)} to ${fmtDate(xs[xs.length - 1].t)} — about <b>${Math.round(R.s30)} per 30 days</b> lately${B ? ` (${fmtPct(pct(R.s30, B.s30))} vs the ${Math.round(w.bDays)} days before)` : ""}.`;
+  let b2 = `A typical session asks for <b>“${CX[lvl]}” of skilled human work</b> (complexity ${R.c.mean.toFixed(2)} of 6)`;
+  if (B && B.c && B.c.sd) {
+    const d = (R.c.mean - B.c.mean) / B.c.sd;
+    b2 += Math.abs(d) < 0.15 ? ", essentially unchanged from the baseline" : `, ${d > 0 ? "trending harder" : "getting easier"} vs the baseline`;
+  }
+  b2 += ".";
+  const kAll = xs.filter((s) => s.k != null).map((s) => s.k);
+  const b3 = `<b>${tok(R.k30)} tokens per 30 days</b> lately${B ? ` (${fmtPct(pct(R.k30, B.k30))} vs before)` : ""}${kAll.length ? ` · ${tok(sum(kAll))} total in this view` : ""}.`;
+  let b4;
+  if (ctx.tok && ctx.tok.rTC != null) {
+    b4 = `<b>More requests do mean more tokens</b> (r ≈ ${ctx.tok.rTC.toFixed(2)} between a session's tool calls and its tokens)${ctx.tok.rUM != null ? ` — how often you message matters less (r ≈ ${ctx.tok.rUM.toFixed(2)})` : ""}${ctx.tok.ratio ? `, and heavier work also spends more per step: days-long sessions use ~${ctx.tok.ratio >= 20 ? Math.round(ctx.tok.ratio) : ctx.tok.ratio.toFixed(1)}× the tokens per tool call of quick asks` : ""}.`;
+  } else b4 = "Token patterns need a few more scored sessions in this view to read.";
+  el.innerHTML = [b1, b2, b3, b4].map((t) => `<li>${t}</li>`).join("");
+  const mark = $("cxmark"), lbl = $("cxlbl"), note = $("cxnote");
+  if (mark && R.c) {
+    const pos = Math.min(100, Math.max(0, R.c.mean / 6 * 100));
+    mark.style.left = lbl.style.left = pos + "%";
+    lbl.textContent = `your sessions: ${R.c.mean.toFixed(2)}`;
+    const lo = Math.floor(R.c.mean), hi = Math.min(6, Math.ceil(R.c.mean));
+    const where = lo === hi ? `right at level ${lo} — “${CX[lo]}”` : `between level ${lo} (“${CX[lo]}”) and level ${hi} (“${CX[hi]}”)`;
+    note.innerHTML = `A session's score is a weighted average across these levels — <b>${R.c.mean.toFixed(2)}</b> lands ${where}. The companion score, <b>leverage</b> (0–5), asks a different question: <em>how did you put the AI to work</em> — from answering from memory up to running an autonomous agent loop.`;
+  }
+}
 
 // ---------- tooltip / count-up ----------
 const tip = $("tip");
@@ -430,7 +578,7 @@ function render() {
   const w = windows(xs, end);
   const R = w ? summary(w.recent, w.rDays) : null, B = w && w.base.length ? summary(w.base, w.bDays) : null;
   ctx = { xs, start, end, w, R, B };
-  renderHero(); renderShift(); renderKpis(); renderStandouts(); renderCurve(); renderScatter(); renderTrend(); renderTable();
+  renderHero(); renderShift(); renderKpis(); renderTokens(); renderTldr(); renderStandouts(); renderCurve(); renderScatter(); renderTrend(); renderTable();
 }
 
 function renderHero() {
@@ -541,8 +689,9 @@ function renderCurve() {
   const isC = state.dist === "c", top = isC ? 6 : 5, bw = isC ? 0.2 : 0.17, binW = isC ? 0.25 : 0.25;
   const val = (s) => (isC ? s.c : s.l);
   $("curve-desc").textContent = isC
-    ? "How much work each session asked for, from a couple of minutes to months for a team. A shift to the right means you're handing over bigger work."
-    : "How the work was delegated: answered from knowledge up to an autonomous agent loop. A shift to the right means more delegation.";
+    ? "Every session, binned by its complexity score. A shift to the right means you're handing the agent bigger work."
+    : "Every session, binned by its leverage score — how the work was delegated. A shift to the right means more delegation.";
+  $("curve-h").textContent = isC ? "How hard is the work?" : "How much do you delegate?";
   const all = xs.map(val).filter((v) => v != null);
   if (!all.length) { box.innerHTML = '<div class="empty">No sessions</div>'; return; }
   const W = box.clientWidth || 700, H = 300, m = { l: 34, r: 12, t: 26, b: 46 };
