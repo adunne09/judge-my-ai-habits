@@ -2,7 +2,7 @@
 
 This document defines the method precisely enough to reimplement it for any agent
 harness: Claude, Codex, Cursor, a custom agent loop, and so
-on. The reference implementation is `session-complexity` (one stdlib-only Python
+on. The reference implementation is `judge-my-ai-habits` (one stdlib-only Python
 file). Where this spec and the code disagree, the code is the source of truth;
 fix whichever one is wrong.
 

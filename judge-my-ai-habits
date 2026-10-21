@@ -37,8 +37,7 @@ HOME = str(pathlib.Path.home())
 HARNESS = "opencode"
 _DATA = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share"))
 _NEW_DB = _DATA / "judge-my-ai-habits" / "analytics.sqlite"
-_LEGACY_DB = _DATA / "opencode-session-complexity" / "sessions.sqlite"  # pre-rename location
-DEFAULT_DB = _LEGACY_DB if _LEGACY_DB.exists() and not _NEW_DB.exists() else _NEW_DB
+DEFAULT_DB = _NEW_DB
 
 # ---------------------------------------------------------------------------
 # Jev questions. Changing any of these changes SCORER_HASH, which rescores sessions.

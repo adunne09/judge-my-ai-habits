@@ -23,11 +23,11 @@ sessions in the harness you're running in right now.
 
 1. If the repo isn't cloned locally yet, clone it. Read README.md.
 2. Check the "Supported harnesses" table in README.md and the HARNESSES registry
-   in session-complexity. If the current harness isn't supported, stop and tell
+   in judge-my-ai-habits. If the current harness isn't supported, stop and tell
    me. Don't try to add support.
 3. If TYPESAFE_API_KEY isn't set, ask me for it. Never print, log, or commit it.
-4. Run `./session-complexity --harness <id>` with the current harness's id, then
-   `./session-complexity report`. Only read the harness's data; never modify it.
+4. Run `./judge-my-ai-habits --harness <id>` with the current harness's id, then
+   `./judge-my-ai-habits report`. Only read the harness's data; never modify it.
 5. In a few sentences, tell me how my last 30 days compare with the time before
    (complexity, leverage, tokens), and give me the dashboard path it printed.
 ```
@@ -59,8 +59,8 @@ Click through time ranges and comparison windows. You can also:
 Settings are kept in the URL, so a view can be bookmarked.
 
 ```sh
-./session-complexity dashboard          # re-render from the database and print the path
-./session-complexity dashboard --open   # …and open it in your browser
+./judge-my-ai-habits dashboard          # re-render from the database and print the path
+./judge-my-ai-habits dashboard --open   # …and open it in your browser
 ```
 
 ## How it works
@@ -226,10 +226,10 @@ Linux, a supported harness, and a TypeSafe API key.
 
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
-./session-complexity                   # score new or changed sessions, then render the dashboard
-./session-complexity report            # recent change, histograms, tokens, and a monthly trend
-./session-complexity report --by week
-./session-complexity dashboard --open  # interactive HTML dashboard
+./judge-my-ai-habits                   # score new or changed sessions, then render the dashboard
+./judge-my-ai-habits report            # recent change, histograms, tokens, and a monthly trend
+./judge-my-ai-habits report --by week
+./judge-my-ai-habits dashboard --open  # interactive HTML dashboard
 python3 make_charts.py                 # regenerate the SVG charts in this README from the DB
 ```
 
@@ -271,8 +271,7 @@ counts include subagents.
 | `--db PATH` | Read a different database, for example a merged one |
 
 Results go to `~/.local/share/judge-my-ai-habits/analytics.sqlite`. Change that
-with `--db`. (A database at the older `opencode-session-complexity` location
-keeps being used if it exists.) Each row is keyed by `(machine, session_id)` and
+with `--db`. Each row is keyed by `(machine, session_id)` and
 records its `harness`. `machine` is the short hostname; override it with
 `--machine`.
 
@@ -303,8 +302,8 @@ databases to one place and merge them:
 mkdir -p data
 scp laptop:.local/share/judge-my-ai-habits/analytics.sqlite data/laptop.sqlite
 scp desktop:.local/share/judge-my-ai-habits/analytics.sqlite data/desktop.sqlite
-./session-complexity merge data/*.sqlite -o all.sqlite
-./session-complexity report --db all.sqlite
+./judge-my-ai-habits merge data/*.sqlite -o all.sqlite
+./judge-my-ai-habits report --db all.sqlite
 ```
 
 Merging is idempotent: re-merging a newer copy from a machine replaces that
@@ -314,7 +313,10 @@ because those scores aren't directly comparable.
 
 ## What the database contains (and doesn't)
 
-The database is safe to copy to another machine as is. Each row holds the
+The database lives at `~/.local/share/judge-my-ai-habits/analytics.sqlite` and
+is safe to copy to another machine as is. It holds one `sessions` row per
+scored session, keyed by `(machine, session_id)`, plus a small table of run
+metadata (scorer hash, model, session counts). Each row holds the
 analytics and nothing about what the work was:
 
 - **Contains:** session id, harness, machine label, model names, timestamps
@@ -359,8 +361,12 @@ parent's actions. The request state contains:
   how many subagents were launched, and which other AI CLIs (`codex`, `claude`,
   `gemini`, `amp`, …) the agent ran from the shell.
 
-Tool outputs, reasoning, and file contents are left out. A typical state is 1k to
-7k tokens. [SPEC.md](SPEC.md) defines every rule exactly.
+This state is the complete body of the one API request sent to
+[TypeSafe](https://www.typesafe.ai) — nothing else about the session leaves the
+machine. Tool outputs, reasoning, and file contents are left out. A typical
+state is 1k to 7k tokens; Jev's answer (the scores, per-level probabilities,
+and confidence) comes back as JSON. [SPEC.md](SPEC.md) defines every rule
+exactly.
 
 Sessions with no user message or no assistant reply get `status = 'empty'` and
 aren't sent to Jev.
@@ -603,17 +609,17 @@ Add support for the harness you're running in right now to judge-my-ai-habits
 (https://github.com/adunne09/judge-my-ai-habits). The tool scores AI agent
 sessions for complexity (0–6) and leverage (0–5) with TypeSafe's Jev and stores
 the results in mergeable SQLite. OpenCode v2 is supported today. Your goal:
-`./session-complexity score --harness <id>` works for the current harness, and
+`./judge-my-ai-habits score --harness <id>` works for the current harness, and
 its scores are comparable with the existing ones. If the current harness is
 already supported, tell me and stop.
 
 Ground rules
 - Clone the repo (or open it if it's already local). Read README.md, SPEC.md,
-  session-complexity, and validation/ end to end before changing anything.
+  judge-my-ai-habits, and validation/ end to end before changing anything.
   SPEC.md is the contract. The OpenCode adapter (class OpenCode, open_opencode,
   and the HARNESSES registry) is the worked example to follow.
 - Stdlib-only Python 3.9+, macOS and Linux only. Add the adapter inside the
-  single session-complexity script.
+  single judge-my-ai-habits script.
 - Access the harness's data read-only. Never modify, lock, or migrate it.
 - Never print, log, or commit the TypeSafe API key, session content, hand
   labels, or scratch databases.
@@ -642,13 +648,13 @@ to:
 - id prefixes, if ids could collide with another harness's
 
 Step 3: Inspect states. Run
-`./session-complexity score --harness <id> --dry-run --limit 10`, then
+`./judge-my-ai-habits score --harness <id> --dry-run --limit 10`, then
 `--dry-run --session <id>` on hand-picked sessions: tiny ones, huge ones,
 tool-heavy ones, and ones with subagents. Read every state. The same kind of
 work should read the same way it does for OpenCode.
 
 Step 4: Iterate manually with Jev. Use the existing repo as guidance for how
-to call the API: the Jev class and QUESTIONS in session-complexity, SPEC.md
+to call the API: the Jev class and QUESTIONS in judge-my-ai-habits, SPEC.md
 section 6, and validation/check_frontier.py. If TYPESAFE_API_KEY isn't set, ask
 me for it. Before scoring at scale:
   a. Pick about 30 varied sessions. Label each yourself on complexity (0–6,
@@ -674,12 +680,12 @@ me for it. Before scoring at scale:
      sessions twice and confirm that scores move by about 0.05 at most.
 
 Step 5: Run in full and merge. Score every session into the default database
-and run `./session-complexity report`. Spot-check the 10 most and 10 least
+and run `./judge-my-ai-habits report`. Spot-check the 10 most and 10 least
 complex personal sessions, what was filtered out as tests, scripted jobs, or
 forks, and the leverage distribution. If a database from another harness is
-available, merge them (`./session-complexity merge a.sqlite b.sqlite -o all.sqlite`)
+available, merge them (`./judge-my-ai-habits merge a.sqlite b.sqlite -o all.sqlite`)
 and confirm there's no scorer-hash warning. Render the merged dashboard
-(`./session-complexity dashboard --db all.sqlite`) and check that the new
+(`./judge-my-ai-habits dashboard --db all.sqlite`) and check that the new
 harness appears in its harness filter and looks right.
 
 Step 6: Document. In README.md, mark the harness as supported in the harness
@@ -695,7 +701,7 @@ unsure about.
 
 | Path | What it is |
 | --- | --- |
-| `session-complexity` | The tool: harness adapters, state builder, Jev client, `score`, `merge`, `report`, `dashboard` |
+| `judge-my-ai-habits` | The tool: harness adapters, state builder, Jev client, `score`, `merge`, `report`, `dashboard` |
 | `dashboard.html` | Template for the interactive dashboard; `dashboard` fills it with data from the database |
 | `SPEC.md` | Harness-independent specification of the method |
 | `make_charts.py` | Regenerates `charts/*.svg` from a results database |

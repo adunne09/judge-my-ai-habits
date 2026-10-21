@@ -291,7 +291,7 @@ const $ = (id) => document.getElementById(id);
 let RAW;
 try { RAW = JSON.parse($("data").textContent); } catch (e) { RAW = null; }
 if (!RAW || !RAW.sessions) {
-  document.body.innerHTML = '<div class="wrap"><div class="empty">This is the dashboard template. Run <code>./session-complexity dashboard</code> to render it with your data.</div></div>';
+  document.body.innerHTML = '<div class="wrap"><div class="empty">This is the dashboard template. Run <code>./judge-my-ai-habits dashboard</code> to render it with your data.</div></div>';
   throw new Error("no data");
 }
 const ALL = RAW.sessions.sort((a, b) => a.t - b.t);
@@ -772,7 +772,7 @@ function initMeta() {
   $("dataset").textContent = `${ALL.length.toLocaleString()} scored · ${hs.join(", ")} · ${ms.length} machine${ms.length > 1 ? "s" : ""}`;
   $("foot").innerHTML = `Personal = scored, judged personal work, not a fork, and not launched by a program.<br>
     Scores by TypeSafe Jev (${esc(META.models.join(", "))}) · scorer ${esc(META.scorers.join(", "))}${META.scorers.length > 1 ? " — mixed scorer versions aren't directly comparable" : ""}<br>
-    Source: ${esc(META.db)} · regenerate with <code>./session-complexity dashboard</code>`;
+    Source: ${esc(META.db)} · regenerate with <code>./judge-my-ai-habits dashboard</code>`;
 }
 
 initMeta(); initControls(); render();

@@ -42,11 +42,10 @@ def spearman(a, b):
 
 def main():
     home = pathlib.Path.home() / ".local" / "share"
-    new, legacy = home / "judge-my-ai-habits" / "analytics.sqlite", home / "opencode-session-complexity" / "sessions.sqlite"
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", required=True)
     ap.add_argument("--field", choices=["complexity", "leverage"], default="complexity")
-    ap.add_argument("--db", default=str(legacy if legacy.exists() and not new.exists() else new))
+    ap.add_argument("--db", default=str(home / "judge-my-ai-habits" / "analytics.sqlite"))
     args = ap.parse_args()
     labels = json.load(open(args.labels))
     db = sqlite3.connect(pathlib.Path(args.db).expanduser())

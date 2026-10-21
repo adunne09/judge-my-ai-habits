@@ -28,7 +28,7 @@ def load(name, path):
 
 
 def main():
-    sc = load("sc", HERE.parent / "session-complexity")
+    sc = load("sc", HERE.parent / "judge-my-ai-habits")
     fr = load("frontier", HERE / "frontier.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=sc.DEFAULT_MODEL)
