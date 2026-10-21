@@ -53,11 +53,14 @@ open it. It has no external requests and works offline.
 <details>
 <summary>Explore the dashboard controls and example charts</summary>
 
-Click through time ranges and comparison windows. You can also:
+It opens with a plain-language TL;DR and a copy-paste prompt you can give your
+own AI agent for advice; the dashboard itself only describes, because its data is
+anonymized. Then it explains the complexity and leverage scales with your share
+of sessions at each level, compares your recent window with the one before in
+words, and shows whether more requests mean more tokens. You can also:
 
-- Switch the curve between complexity and leverage.
-- Click a bar or a week to list its sessions.
-- Explore the size × delegation map.
+- Pick the session set, time range, and comparison windows from the line at the top.
+- Click a level or a week to list its sessions.
 - Filter by **Harness** or **Machine**. Each dropdown appears when the database
   has scored sessions from more than one harness or machine. Choose one value or
   all; the charts, comparisons, and session list update together.
