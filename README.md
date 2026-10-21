@@ -2,7 +2,8 @@
 
 See how effectively you work with AI, and how your habits are changing over time.
 
-It reads your past sessions with an AI agent and has a model judge each one on
+It discovers your past sessions across **OpenCode, Claude Code / Cowork, and
+Codex**, then has a model judge each one on
 two things:
 
 - **Complexity:** how big was the work you asked for? From a couple of minutes
@@ -19,21 +20,20 @@ Paste this into the coding agent you use most:
 
 ```text
 Run judge-my-ai-habits (https://github.com/adunne09/judge-my-ai-habits) on my
-sessions in the harness you're running in right now.
+sessions across all supported harnesses installed on this machine.
 
 1. If the repo isn't cloned locally yet, clone it. Read README.md.
-2. Check the "Supported harnesses" table in README.md and the HARNESSES registry
-   in judge-my-ai-habits. If the current harness isn't supported, stop and tell
-   me. Don't try to add support.
+2. Check the "Supported harnesses" table in README.md. The script discovers all
+   supported harnesses automatically, regardless of which agent is running it.
 3. If TYPESAFE_API_KEY isn't set, ask me for it. Never print, log, or commit it.
-4. Run `./judge-my-ai-habits --harness <id>` with the current harness's id, then
-   `./judge-my-ai-habits report`. Only read the harness's data; never modify it.
+4. Run `./judge-my-ai-habits`, then `./judge-my-ai-habits report`. Only read the
+   harnesses' data; never modify it. Mention any skipped or failed harnesses.
 5. In a few sentences, tell me how my last 30 days compare with the time before
    (complexity, leverage, tokens), and give me the dashboard path it printed.
 ```
 
 Each session's summary is sent to [TypeSafe](https://www.typesafe.ai)'s Jev for
-scoring; the results stay on your machine. If your harness isn't supported yet,
+scoring; the results stay on your machine. If another harness isn't supported yet,
 see [Add support for another harness](#add-support-for-another-harness).
 
 ![Complexity histogram](charts/complexity.svg)
@@ -106,13 +106,21 @@ can be reimplemented for any agent client.
 
 | Harness | Status | `--harness` |
 | --- | --- | --- |
-| [OpenCode](https://opencode.ai) v2 | Supported | `opencode` (default) |
+| [OpenCode](https://opencode.ai) v2 | Supported | `opencode` |
 | Claude: [Claude Code](https://claude.com/claude-code) (CLI, IDE extensions) and the Claude desktop app (Code tab and Cowork) | Supported | `claude` |
-| Codex CLI | Coming soon | |
+| Codex (CLI, IDE extension, desktop app's local sessions) | Supported | `codex` |
 | Cursor | Coming soon | |
 
 More are coming very soon. To add one yourself, see
 [Add support for another harness](#add-support-for-another-harness).
+
+The default is **`--harness all`**: discover every supported harness, score new
+or changed sessions into the same database, and render one combined dashboard.
+No separate runs or merge step are needed on one machine. Missing installations
+or transcripts are reported and skipped. A harness that fails to read is
+reported separately; the others still run, then the command exits nonzero so an
+incomplete scan is visible. Selecting `--harness codex` (or another id) limits
+discovery to that harness and makes missing data an error.
 
 ### Harness notes: OpenCode
 
@@ -196,8 +204,8 @@ Mapping decisions:
   `summary` record. Cowork transcripts have none, so the desktop app's title is used.
 - **Tokens** are summed once per `message.id`. Thinking tokens are part of
   `output_tokens` and are stored as `tokens_reasoning`.
-- **Ids** are the engine's session UUIDs, unprefixed: they can't collide with
-  OpenCode's `ses_…` ids.
+- **Ids** are the engine's session UUIDs, unprefixed: OpenCode uses `ses_…`
+  and Codex uses `codex:…`, so they don't collide.
 
 Known gaps:
 
@@ -219,6 +227,66 @@ Known gaps:
   `cleanupPeriodDays` (default 30), so score regularly or raise that setting to
   keep history.
 
+### Harness notes: Codex
+
+Reads `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`,
+and titles from `~/.codex/session_index.jsonl`. Set `CODEX_HOME` to use a different
+data directory. No Codex binary is required, and its databases are never opened.
+The CLI, IDE extension, and desktop app share this rollout format.
+
+Mapping decisions:
+
+- **One conversation, not one file.** Group rollout segments by the metadata's
+  session id. Resumed desktop conversations can have several files with different
+  UUID suffixes. `history_base` links between these segments are not treated as
+  forks. Identical records, completed item ids, and response usage ids are
+  deduplicated. Incomplete JSONL lines are skipped.
+- **User messages** prefer explicit `UserMessage` completion events (or legacy
+  `user_message` events). Those distinguish real prompts from environment,
+  AGENTS.md, skill, and compaction context injected into user-role messages.
+  Older response-only rollouts use filtered user-role messages. Attachments
+  count as attachments; their contents are not sent.
+- **Assistant messages** use completed `AgentMessage` events when present,
+  otherwise assistant response items. Mirrored response items aren't counted
+  twice. Reasoning, tool outputs, and compaction replacement histories are omitted.
+- **Tools** normalize shell argv / `exec_command` to `shell`, `spawn_agent` to
+  `subagent`, `update_plan` to `todowrite`, and MCP names to `server.tool`.
+  Patches retain affected paths, not file contents. Code-mode `exec` wrappers
+  use the actual completed shell, web, and MCP actions when recorded. Otherwise,
+  literal JSON arguments are parsed without executing JavaScript; dynamic code
+  falls back to an `execute` summary. Tool discovery is omitted. Temporary
+  attachment paths are shortened so they don't falsely count as running Codex.
+- **Tokens** use modern per-response `token_usage_record.usage`, deduplicated by
+  response id, or the last legacy cumulative `token_count` snapshot. If a session
+  spans an upgrade, its legacy prefix is retained alongside modern usage. Cached
+  input is already included in input tokens, and reasoning is included in output
+  tokens: both are split out before summing, never added twice. Missing usage and
+  all costs are NULL.
+- **Subagents / forks:** `source.subagent.thread_spawn.parent_thread_id` links
+  child sessions; explicit `forked_from_id` / `forked_from` marks forks.
+  Descendant usage and update times roll up to the root. Session ids are prefixed
+  `codex:` to avoid collisions with Claude UUIDs.
+- **Program launches:** `source = exec` or `sdk`, subagent sources, and explicit
+  automation / scheduled / heartbeat thread sources are flagged. Desktop / IDE
+  `source = vscode` and interactive `cli` sessions remain personal candidates.
+- **Updated times** come from transcript activity, including child activity;
+  desktop settings-only events and title-index changes don't trigger rescoring.
+
+Known gaps:
+
+- Only locally retained rollouts are covered; cloud-only tasks aren't downloaded.
+- Subagent, explicit fork, and automation metadata are covered by synthetic
+  regression fixtures; this machine had no examples to validate against live data.
+- A missing rollout segment cannot be reconstructed. Dynamic code-mode arguments
+  without completion events retain only a compact code/tool-name summary.
+- Version-specific injected user text in response-only histories may need more
+  filtering as Codex evolves. Legacy cumulative usage assumes the counter does
+  not reset; modern per-response records avoid that ambiguity.
+- The oldest pre-envelope JSONL format is also read. It has a bare session header
+  followed by response items, without per-message timestamps or usage. Tokens
+  stay NULL; active-time metrics cannot be reconstructed, and file mtime is used
+  to detect updates. Repeated prompts are preserved even without message ids.
+
 ## Run it
 
 It's a single Python file with no dependencies. It needs Python 3.9+ on macOS or
@@ -226,7 +294,8 @@ Linux, a supported harness, and a TypeSafe API key.
 
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
-./judge-my-ai-habits                   # score new or changed sessions, then render the dashboard
+./judge-my-ai-habits                   # discover all supported harnesses, score updates, render one dashboard
+./judge-my-ai-habits --harness codex   # optional: only Codex
 ./judge-my-ai-habits report            # recent change, histograms, tokens, and a monthly trend
 ./judge-my-ai-habits report --by week
 ./judge-my-ai-habits dashboard --open  # interactive HTML dashboard
@@ -284,9 +353,9 @@ Other `score` options:
 
 | Flag | Effect |
 | --- | --- |
-| `--harness opencode` | Which harness to read sessions from: `opencode` (default) or `claude` |
+| `--harness all` | Read every available supported harness (default); use `opencode`, `claude`, or `codex` to select one |
 | `--since 2026-09-01` | Only sessions created on or after that date |
-| `--limit N` | Score at most N sessions, newest first |
+| `--limit N` | Score at most N sessions total across selected harnesses, newest first |
 | `--session <id>` | Score specific sessions (repeatable) |
 | `--rescore` | Score again even if nothing changed |
 | `--dry-run` | Print exactly what Jev would see, without calling it |
@@ -295,7 +364,7 @@ Other `score` options:
 
 ## Several machines and harnesses
 
-Run the script on each machine, for each harness you use. Then copy the
+Run the script once on each machine; it discovers all supported harnesses. Then copy the
 databases to one place and merge them:
 
 ```sh
@@ -487,6 +556,59 @@ top of the scale).
 | --- | --- | --- | --- | --- |
 | OpenCode v2 | 0.96 (31) | 0.95 (34) | Pass: 5.3–6.0 complexity, 4.9–5.0 leverage | ≤ 0.05 |
 | Claude (engine 2.1) | 0.96 (16) | 0.87 (14) | Pass: 5.3–6.0 complexity, 4.9–5.0 leverage | mean 0.02, max 0.12 (see below) |
+| Codex (0.45–0.155 rollouts) | 0.85 (30) | 0.92 (16) | Pass: 5.35–6.00 complexity, 4.90–5.00 leverage | mean 0.02, max 0.06 |
+
+**Codex.** Validated on 56 local rollout files representing 50 conversations:
+46 had both a real user message and an assistant response; four were empty or
+abandoned starts. Labels for complexity and leverage were assigned from states
+before scoring: 30 development sessions and 16 blind holdout sessions. This is
+fewer than the protocol's requested 20 holdout sessions, and mostly short
+research / chat tasks rather than large coding projects.
+
+Two adapter iterations were scored with the same questions, model, and frozen
+labels:
+
+| Codex variant (dev, n=30) | Complexity Spearman | Complexity MAE | Leverage Spearman |
+| --- | --- | --- | --- |
+| First pass: grouped segments, canonical message events, completed code-mode actions | 0.847 | 0.320 | 0.895 |
+| Second pass: literal code-mode fallback, web-open mapping, discovery filtering, temp-path normalization | 0.847 | 0.312 | 0.887 |
+
+The second pass is kept for more faithful states, not a claimed improvement in
+correlation. For example, shell commands inside wrappers now retain their
+arguments and website opens are identified as fetches instead of searches.
+Development complexity is **below the 0.90 target**. The largest disagreements
+were how much effort to assign short research requests, and whether a few
+lookups across follow-ups count as steered work or simple lookups; inspection
+didn't find missing user requests in those states. Labels and shared questions
+were not changed to chase agreement.
+
+The untouched holdout scored **0.919 complexity Spearman (MAE 0.281)** and
+**0.849 leverage Spearman (MAE 0.407)**. All five synthetic frontier checks
+passed. Treat these as small-sample validation, not full coverage of Codex's
+subagent, automation, or fork behavior; those paths have offline synthetic tests.
+
+**Codex repeatability:** two fresh scoring passes over 20 frozen development
+states differed by mean 0.020 / max 0.060 in complexity and mean 0.007 / max
+0.060 in leverage. An OpenCode control on the same day (18 usable sessions of
+20 sampled) differed by mean 0.023 / max 0.100 in complexity and mean 0.003 /
+max 0.030 in leverage. Codex drift was comparable to the existing harness.
+
+**End-to-end checks:** the default all-harness run discovered 1,900 top-level
+sessions (1,849 OpenCode, one empty Claude transcript, 50 Codex). It stored 1,798
+scores and 102 empty rows with zero errors. All rows used the existing scorer
+hash and model. Splitting by harness and merging reproduced all 1,900 rows
+exactly; the dashboard included both harnesses with scored data. An unchanged
+Codex rerun had zero pending sessions. All 18 offline regression tests passed,
+including mixed-version resumes, nested subagents, missing-harness handling,
+global limits, incremental combined runs, pre-envelope history, and native web
+and image-generation calls. A later scan of a second machine exposed the
+pre-envelope format; that coverage was added without changing the 50 original
+Codex states or their validation results.
+
+**Origin spot-check:** 42 of 46 scored Codex sessions entered the personal view.
+Two greetings were classified as tests, but so were a real factual lookup and
+a skill-install request. These are false exclusions by the shared origin
+classifier, not deterministic launcher flags; use `report --all` to include them.
 
 **Claude.** The validation machine had 31 usable sessions: 15 from the CLI and
 the desktop Code tab, and 16 from Cowork. That is fewer than the protocol's
@@ -608,7 +730,7 @@ agent already knows which harness it's running in.
 Add support for the harness you're running in right now to judge-my-ai-habits
 (https://github.com/adunne09/judge-my-ai-habits). The tool scores AI agent
 sessions for complexity (0–6) and leverage (0–5) with TypeSafe's Jev and stores
-the results in mergeable SQLite. OpenCode v2 is supported today. Your goal:
+the results in mergeable SQLite. OpenCode v2, Claude, and Codex are supported today. Your goal:
 `./judge-my-ai-habits score --harness <id>` works for the current harness, and
 its scores are comparable with the existing ones. If the current harness is
 already supported, tell me and stop.
@@ -638,7 +760,9 @@ options (for example an official data export) before writing code.
 
 Step 2: Write the adapter. Implement name, version(), sessions(), and
 messages() as SPEC.md section 3 describes, mapping onto the session record and
-the common message format, and register it in HARNESSES. Pay special attention
+the common message format, and register it in HARNESSES. The default all-harness
+run will then discover it automatically. Raise HarnessUnavailable from the opener
+when the harness isn't installed or has no transcripts. Pay special attention
 to:
 - excluding synthetic user-role messages (tool results, reminders, summaries)
 - mapping tool names onto the shared vocabulary, with MCP tools as server.tool
@@ -707,3 +831,4 @@ unsure about.
 | `make_charts.py` | Regenerates `charts/*.svg` from a results database |
 | `validation/agreement.py` | Spearman and error between your hand labels and the scores |
 | `validation/check_frontier.py`, `validation/frontier.py` | Synthetic frontier sessions that must score at the top of the scale |
+| `validation/test_adapters.py` | Offline synthetic regression checks for Codex and combined discovery; run `python3 -m unittest discover -s validation -p 'test_*.py'` |

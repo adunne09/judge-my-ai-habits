@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """judge-my-ai-habits: rate every AI agent session on this machine with TypeSafe's Jev.
 
-Reads sessions from a supported agent harness (OpenCode v2 through `opencode api`,
-or Claude Code's and Claude Desktop Cowork's transcripts), asks Jev how much work each
+Reads sessions from every available supported harness (OpenCode v2 through `opencode api`,
+Claude Code / Cowork and Codex transcripts), asks Jev how much work each
 session represents and how it was delegated, and writes one row per session into a SQLite database that can be
 merged with databases from other machines and other harnesses. See SPEC.md.
 
@@ -153,10 +153,14 @@ SCORER_HASH = hashlib.sha256(json.dumps([SCORER_VERSION, QUESTIONS, TRACE_CAP, U
 # ---------------------------------------------------------------------------
 
 
+class HarnessUnavailable(RuntimeError):
+    """A supported harness has no local installation or transcripts."""
+
+
 def find_opencode() -> str:
     found = shutil.which("opencode") or str(pathlib.Path.home() / ".opencode" / "bin" / "opencode")
     if not os.path.exists(found):
-        sys.exit("error: could not find the `opencode` binary on PATH or in ~/.opencode/bin")
+        raise HarnessUnavailable("could not find the `opencode` binary on PATH or in ~/.opencode/bin")
     return found
 
 
@@ -512,12 +516,323 @@ def open_claude():
     root = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path.home() / ".claude").expanduser()
     adapter = Claude(root)
     if not adapter.transcripts():
-        sys.exit(f"error: no Claude transcripts found in {root / 'projects'} or {DESKTOP} (set CLAUDE_CONFIG_DIR if they live elsewhere)")
+        raise HarnessUnavailable(f"no Claude transcripts found in {root / 'projects'} or {DESKTOP} (set CLAUDE_CONFIG_DIR if they live elsewhere)")
+    return adapter
+
+
+# ---------------------------------------------------------------------------
+# Codex access: CLI, IDE and desktop rollouts (legacy and paginated history)
+# ---------------------------------------------------------------------------
+
+CODEX_TMP = re.compile(r"(?:/private)?/tmp/codex-remote-attachments/[0-9a-f-]{36}")
+
+
+def read_codex_jsonl(path):
+    """Normalize pre-envelope rollouts (September 2025) as well as modern JSONL."""
+    legacy = False
+    for ordinal, r in enumerate(read_jsonl(path)):
+        if ordinal == 0 and not r.get("type") and r.get("id") and r.get("timestamp"):
+            legacy = True
+            yield {"type": "session_meta", "timestamp": r["timestamp"],
+                   "payload": {**r, "legacy_rollout": True}}
+        elif legacy and r.get("type"):
+            # These items have no timestamps, and user messages have no ids.
+            # Keep repeated identical prompts distinct without inventing times.
+            yield {"type": "response_item", "payload": r, "timestamp": r.get("timestamp"),
+                   "_legacy_segment": path.name, "_legacy_ordinal": ordinal}
+        elif not legacy:
+            yield r
+
+
+def codex_text(content):
+    if isinstance(content, str):
+        return content, []
+    blocks = [b for b in content or [] if isinstance(b, dict)]
+    text = "\n".join(b.get("text") or "" for b in blocks if b.get("type", "").lower() in ("text", "input_text", "output_text"))
+    files = [{"name": "attachment"} for b in blocks if b.get("type", "").lower() in
+             ("image", "input_image", "localimage", "local_image", "input_file", "file")]
+    return text, files
+
+
+def codex_tool(name, inp, namespace=None):
+    """Normalize a direct call without retaining patches, file contents or tool outputs."""
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except ValueError:
+            inp = {"patch": inp} if name == "apply_patch" else {"code": inp}
+    inp = dict(inp) if isinstance(inp, dict) else {}
+    if name in ("search_tool_bm25", "tool_search"):
+        return []
+    if namespace and namespace.startswith("mcp__"):
+        name = f"{namespace[5:]}.{name}"
+    elif name.startswith("mcp__") and "__" in name[5:]:
+        name = name[5:].replace("__", ".", 1)
+    elif name in ("shell", "shell_command", "exec_command", "local_shell"):
+        name = "shell"
+        cmd = inp.get("command", inp.get("cmd", ""))
+        if isinstance(cmd, list):
+            cmd = cmd[-1] if len(cmd) >= 3 and cmd[-2] in ("-c", "-lc") else " ".join(map(str, cmd))
+        inp = {"command": CODEX_TMP.sub("$ATTACHMENTS", cmd)}
+    elif name in ("spawn_agent", "collaboration.spawn_agent"):
+        name, inp = "subagent", {"prompt": inp.get("message") or inp.get("prompt", "")}
+    elif name == "update_plan":
+        name, inp = "todowrite", {}
+    elif name in ("request_user_input", "request_user_input_async"):
+        name = "question"
+    elif name == "view_image":
+        name = "read"
+    elif name == "apply_patch":
+        paths = re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", inp.get("patch") or inp.get("input") or "", re.M)
+        return [{"type": "tool", "name": "patch", "state": {"input": {"path": p}}} for p in paths] or [
+            {"type": "tool", "name": "patch", "state": {"input": {}}}]
+    elif name == "exec":
+        return codex_code_tools(inp.get("code", ""))
+    return [{"type": "tool", "name": name, "state": {"input": inp}}]
+
+
+def codex_code_tools(code):
+    """Read literal JSON arguments in code mode; never evaluate transcript code.
+
+    Completed action events take precedence. This covers older wrappers that
+    didn't emit them; dynamic JS arguments remain a compact execute summary.
+    """
+    parts = []
+    calls = list(re.finditer(r'tools(?:\.([\w]+)|\["([\w.-]+)"\])\s*\(', code))
+    for call in calls:
+        name = call.group(1) or call.group(2)
+        try:
+            inp, _ = json.JSONDecoder().raw_decode(code[call.end():].lstrip())
+        except ValueError:
+            return [{"type": "tool", "name": "execute", "state": {"input": {"code": code}}}]
+        if name in ("web__run", "web.run") and isinstance(inp, dict):
+            if inp.get("search_query"):
+                parts += codex_tool("websearch", {"query": "; ".join(q.get("q", "") for q in inp["search_query"])})
+            for opened in inp.get("open") or []:
+                parts += codex_tool("webfetch", {"url": opened.get("ref_id", "")})
+            if not inp.get("search_query") and not inp.get("open"):
+                parts += codex_tool("web.run", inp)
+        elif name != "exec":
+            parts += codex_tool(name, inp)
+    if calls:
+        return parts
+    if "ALL_TOOLS" in code and re.search(r"\.(?:filter|find|map)\s*\(", code):
+        return []  # tool discovery, not work on the task
+    return [{"type": "tool", "name": "execute", "state": {"input": {"code": code}}}]
+
+
+def codex_event_tools(item):
+    """Actual actions emitted inside Codex's exec code-mode wrapper."""
+    kind = item.get("type")
+    if kind == "CommandExecution":
+        return codex_tool("shell", {"command": item.get("command", "")})
+    if kind == "McpToolCall":
+        return codex_tool(f"{item.get('server')}.{item.get('tool')}", item.get("arguments"))
+    if kind == "ImageView":
+        return codex_tool("read", {"path": item.get("path", "")})
+    if kind == "FileChange":
+        changes = item.get("changes") or {}
+        paths = changes.keys() if isinstance(changes, dict) else [c.get("path", "") for c in changes]
+        return [p for path in paths for p in codex_tool("patch", {"path": path})]
+    if kind == "WebSearch" or kind == "Extension" and item.get("kind", "").startswith("web."):
+        action = item.get("action") or {}
+        if action.get("type") in ("open", "open_page", "openPage", "find_in_page"):
+            return codex_tool("webfetch", {"url": action.get("url", "")})
+        query = action.get("query") or "; ".join(action.get("queries") or []) or item.get("query", "")
+        if query:
+            return codex_tool("webfetch" if query.startswith(("http://", "https://")) else "websearch", {"url" if query.startswith(("http://", "https://")) else "query": query})
+    return []
+
+
+class Codex:
+    name = "codex"
+
+    def __init__(self, root):
+        self.root, self.paths = root, {}
+        self.versions = []
+
+    def transcripts(self):
+        return sorted(self.root.glob("sessions/**/*.jsonl")) + sorted(self.root.glob("archived_sessions/**/*.jsonl"))
+
+    def version(self):
+        return "codex " + ", ".join(sorted(set(self.versions))) if self.versions else "codex"
+
+    def records(self, sid):
+        # A resumed app session may have several rollout segments. Metadata id, not
+        # the filename's last UUID, identifies the conversation. Deduplicate copies.
+        out, seen = [], set()
+        for path in self.paths[sid]:
+            records = list(read_codex_jsonl(path))
+            event_kinds = {(r.get("payload", {}).get("item") or {}).get("type") for r in records if r.get("type") == "event_msg"}
+            user_events = "UserMessage" in event_kinds or any(r.get("type") == "event_msg" and r.get("payload", {}).get("type") == "user_message" for r in records)
+            for r in records:
+                key = hashlib.sha256(json.dumps(r, sort_keys=True).encode()).digest()
+                if key not in seen:
+                    seen.add(key)
+                    # Decide per segment: an upgrade must not hide older turns
+                    # that only have response items, before event history existed.
+                    r["_message_events"] = (user_events, "AgentMessage" in event_kinds)
+                    out.append(r)
+        return sorted(out, key=lambda r: iso_ms(r.get("timestamp")) or 0)
+
+    @staticmethod
+    def usage(records):
+        # Modern records give per-response usage; token_count is a duplicate
+        # cumulative snapshot. Cached input and reasoning are subsets, not extra.
+        usages, seen, legacy = [], set(), None
+        for r in records:
+            p = r.get("payload") or {}
+            if not usages and r.get("type") == "event_msg" and p.get("type") == "token_count":
+                snapshot = (p.get("info") or {}).get("total_token_usage")
+                if isinstance(snapshot, dict):
+                    legacy = snapshot
+            if r.get("type") == "token_usage_record" and isinstance(p.get("usage"), dict):
+                key = p.get("response_id") or json.dumps(p, sort_keys=True)
+                if key not in seen:
+                    seen.add(key)
+                    usages.append(p["usage"])
+        if legacy is not None:
+            usages.insert(0, legacy)  # usage before an upgrade to per-response records
+        if not usages:
+            return None
+        sums = {k: sum(int(u.get(k) or 0) for u in usages) for k in
+                ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens")}
+        return {"input": max(0, sums["input_tokens"] - sums["cached_input_tokens"] - sums["cache_write_input_tokens"]),
+                "output": max(0, sums["output_tokens"] - sums["reasoning_output_tokens"]),
+                "reasoning": sums["reasoning_output_tokens"],
+                "cache": {"read": sums["cached_input_tokens"], "write": sums["cache_write_input_tokens"]}}
+
+    def sessions(self):
+        self.paths, self.versions = {}, []
+        for path in self.transcripts():
+            meta = next((r.get("payload") or {} for r in read_codex_jsonl(path) if r.get("type") == "session_meta"), {})
+            sid = meta.get("id") or meta.get("session_id")
+            if sid:
+                self.paths.setdefault(f"codex:{sid}", []).append(path)
+        titles = {}
+        index = self.root / "session_index.jsonl"
+        if index.exists():
+            for r in read_jsonl(index):
+                if r.get("id") and r.get("thread_name"):
+                    titles[f"codex:{r['id']}"] = r["thread_name"]
+        out = []
+        for sid in self.paths:
+            records = self.records(sid)
+            metas = [r["payload"] for r in records if r.get("type") == "session_meta"]
+            meta = metas[0]
+            activity = [r for r in records if r.get("type") != "event_msg" or r.get("payload", {}).get("type") != "thread_settings_applied"]
+            stamps = [ms for ms in (iso_ms(r.get("timestamp")) for r in activity) if ms]
+            if not stamps:
+                stamps = [int(min(p.stat().st_mtime for p in self.paths[sid]) * 1000)]
+            created = min([iso_ms(m.get("timestamp")) or min(stamps) for m in metas])
+            if any(m.get("legacy_rollout") for m in metas):
+                # No per-message timestamps exist in the oldest format. The
+                # transcript mtime is the only available change indicator.
+                stamps.extend(int(p.stat().st_mtime * 1000) for p in self.paths[sid])
+            models = [r["payload"]["model"] for r in records if r.get("type") == "turn_context" and r.get("payload", {}).get("model")]
+            source = meta.get("source")
+            sub = source.get("subagent") if isinstance(source, dict) else None
+            spawn = sub.get("thread_spawn") if isinstance(sub, dict) else None
+            parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+            launch = source if source in ("exec", "sdk") else "subagent" if sub else None
+            if meta.get("thread_source") in ("automation", "scheduled", "heartbeat"):
+                launch = meta["thread_source"]
+            version = metas[-1].get("cli_version")
+            if version:
+                self.versions.append(version)
+            s = {"id": sid, "title": titles.get(sid), "time": {"created": created, "updated": max(stamps)},
+                 "location": {"directory": meta.get("cwd")}, "tokens": self.usage(records), "cost": None,
+                 "model": {"providerID": meta.get("model_provider") or "openai", "id": models[-1]} if models else {},
+                 "metadata": {"source": launch}, "version": f"codex {version}" if version else "codex"}
+            if parent:
+                s["parentID"] = f"codex:{parent}"
+            fork = meta.get("forked_from_id") or meta.get("forked_from")
+            if isinstance(fork, str):
+                s["fork"] = {"sessionID": f"codex:{fork}"}
+            out.append(s)
+        return out
+
+    def messages(self, session_id):
+        if session_id not in self.paths:
+            self.sessions()
+        records = self.records(session_id)
+        out, seen, wrappers = [], set(), {}
+        model = {}
+        for r in records:
+            p, typ = r.get("payload") or {}, r.get("type")
+            user_events, agent_events = r["_message_events"]
+            kind = p.get("type")
+            created = iso_ms(r.get("timestamp"))
+            if typ == "turn_context":
+                model = {"providerID": "openai", "id": p.get("model")}
+            msg = {"type": "assistant", "time": {"created": created}, "model": model, "content": []}
+            if typ == "event_msg" and kind == "item_completed":
+                item = p.get("item") or {}
+                key = (p.get("turn_id"), item.get("id"))
+                if item.get("id") and key in seen:
+                    continue
+                seen.add(key)
+                ik = item.get("type")
+                if ik == "UserMessage":
+                    text, files = codex_text(item.get("content"))
+                    out.append({"type": "user", "text": text, "files": files, "time": {"created": created}})
+                elif ik == "AgentMessage":
+                    text, _ = codex_text(item.get("content"))
+                    msg["content"] = [{"type": "text", "text": text}]
+                elif wrappers:
+                    parts = codex_event_tools(item)
+                    if parts:
+                        # These are the executed actions, not a second call in
+                        # addition to the wrapper. Preserve actual arguments.
+                        wrapper = next(reversed(wrappers.values()))
+                        if not wrapper[1]:
+                            wrapper[0]["content"] = []
+                            wrapper[1] = True
+                        msg["content"] = parts
+            elif typ == "event_msg" and kind == "user_message":
+                out.append({"type": "user", "text": p.get("message", ""), "time": {"created": created},
+                            "files": [{"name": "image"}] * (len(p.get("images") or []) + len(p.get("local_images") or []))})
+            elif typ == "response_item":
+                if kind == "message":
+                    text, files = codex_text(p.get("content"))
+                    if p.get("role") == "user" and not user_events:
+                        if not re.match(r"\s*(?:# AGENTS\.md instructions|<environment_context>|<permissions instructions>|<turn_aborted>|<subagent_notification>|<user_instructions>)", text):
+                            out.append({"type": "user", "text": text, "files": files, "time": {"created": created}})
+                    elif p.get("role") == "assistant" and not agent_events:
+                        msg["content"] = [{"type": "text", "text": text}]
+                elif kind in ("function_call", "custom_tool_call", "local_shell_call", "web_search_call", "image_generation_call"):
+                    call_id = p.get("call_id") or p.get("id")
+                    if call_id and call_id in seen:
+                        continue
+                    seen.add(call_id)
+                    if kind == "local_shell_call":
+                        parts = codex_tool("shell", p.get("action"))
+                    elif kind == "web_search_call":
+                        parts = codex_event_tools({"type": "WebSearch", "action": p.get("action")}) or codex_tool("websearch", {})
+                    elif kind == "image_generation_call":
+                        parts = codex_tool("imagegen", {"description": "generate an image"})
+                    else:
+                        parts = codex_tool(p.get("name", "?"), p.get("arguments", p.get("input")), p.get("namespace"))
+                    msg["content"] = parts
+                    if p.get("name") == "exec":
+                        wrappers[call_id] = [msg, False]
+                elif kind in ("function_call_output", "custom_tool_call_output"):
+                    wrappers.pop(p.get("call_id"), None)
+            if msg["content"]:
+                out.append(msg)
+        return [m for m in out if m["type"] != "assistant" or m["content"]]
+
+
+def open_codex():
+    root = pathlib.Path(os.environ.get("CODEX_HOME") or pathlib.Path.home() / ".codex").expanduser()
+    adapter = Codex(root)
+    if not adapter.transcripts():
+        raise HarnessUnavailable(f"no Codex transcripts found in {root} (set CODEX_HOME if they live elsewhere)")
     return adapter
 
 
 # Adapters by --harness id. A new harness adds an entry here; see SPEC.md.
-HARNESSES = {"opencode": open_opencode, "claude": open_claude}
+HARNESSES = {"opencode": open_opencode, "claude": open_claude, "codex": open_codex}
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +1223,7 @@ def base_row(machine, session, children, opencode_version):
     tok = session.get("tokens") or {}
     cache = tok.get("cache") or {}
     own_total = sum(int(tok.get(k) or 0) for k in ("input", "output", "reasoning")) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+    tokens_known = session.get("tokens") is not None and all(c.get("tokens") is not None for c in children)
     child_total, child_cost = 0, 0.0
     for c in children:
         ct = c.get("tokens") or {}
@@ -942,9 +1258,9 @@ def base_row(machine, session, children, opencode_version):
         "tokens_reasoning": tok.get("reasoning"),
         "tokens_cache_read": cache.get("read"),
         "tokens_cache_write": cache.get("write"),
-        "tokens_total": own_total + child_total,
+        "tokens_total": own_total + child_total if tokens_known else None,
         "cost_usd": round(float(session.get("cost") or 0) + child_cost, 6) if cost_known else None,
-        "opencode_version": opencode_version,
+        "opencode_version": session.get("version") or opencode_version,
     }
 
 
@@ -986,43 +1302,72 @@ def score_one(oc, jev, machine, session, children, opencode_version):
         return row, 0
 
 
+def group_sessions(sessions):
+    """Roll descendants into their top-level parent, including update timestamps."""
+    by_id = {s["id"]: s for s in sessions}
+    children = {}
+    for s in sessions:
+        parent, visited = s.get("parentID"), {s["id"]}
+        while parent in by_id and by_id[parent].get("parentID") and parent not in visited:
+            visited.add(parent)
+            parent = by_id[parent]["parentID"]
+        if parent and parent not in visited:
+            children.setdefault(parent, []).append(s)
+    roots = [s for s in sessions if not s.get("parentID")]
+    for s in roots:
+        stamps = [(c.get("time") or {}).get("updated") for c in [s] + children.get(s["id"], [])]
+        if any(stamps):
+            s.setdefault("time", {})["updated"] = max(t for t in stamps if t)
+    return roots, children
+
+
 def cmd_score(args):
     api_key = os.environ.get("TYPESAFE_API_KEY")
-    oc = HARNESSES[args.harness]()
-    version = oc.version()
     machine = args.machine or socket.gethostname().split(".")[0]
     db = connect(pathlib.Path(args.db).expanduser())
     jev = Jev(api_key or "", args.model)
 
-    print(f"machine={machine} harness={oc.name} version={version} model={args.model} scorer={SCORER_HASH} db={args.db}", file=sys.stderr)
-    all_sessions = oc.sessions()
-    children = {}
-    for s in all_sessions:
-        if s.get("parentID"):
-            children.setdefault(s["parentID"], []).append(s)
-    roots = [s for s in all_sessions if not s.get("parentID")]
-    if args.since:
-        cutoff = dt.datetime.fromisoformat(args.since).timestamp() * 1000
-        roots = [s for s in roots if (s.get("time") or {}).get("created", 0) >= cutoff]
-    if args.session:
-        roots = [s for s in roots if s["id"] in set(args.session)]
-
-    done = {}
-    for sid, updated, status, scorer, model in db.execute("SELECT session_id, updated_ms, status, scorer_hash, jev_model FROM sessions WHERE machine = ? AND harness = ?", (machine, oc.name)):
-        done[sid] = (updated, status, scorer, model)
-
-    def stale(s):
-        prev = done.get(s["id"])
-        if args.rescore or prev is None:
-            return True
-        updated, status, scorer, _ = prev
-        return status == "error" or scorer != SCORER_HASH or updated != (s.get("time") or {}).get("updated")
-
-    todo = [s for s in roots if stale(s)]
-    todo.sort(key=lambda s: -((s.get("time") or {}).get("created") or 0))
+    todo, versions, discovery_errors = [], [], []
+    roots_seen, available = 0, 0
+    for name in HARNESSES if args.harness == "all" else [args.harness]:
+        try:
+            oc = HARNESSES[name]()
+            all_sessions = oc.sessions()
+            version = oc.version()
+        except HarnessUnavailable as e:
+            if args.harness != "all":
+                sys.exit(f"error: {e}")
+            print(f"skip {name}: {e}", file=sys.stderr)
+            continue
+        except Exception as e:
+            if args.harness != "all":
+                sys.exit(f"error: {name}: {e}")
+            discovery_errors.append(name)
+            print(f"warning: could not read {name}: {e}", file=sys.stderr)
+            continue
+        available += 1
+        versions.append(f"{name}={version}")
+        print(f"machine={machine} harness={name} version={version} model={args.model} scorer={SCORER_HASH} db={args.db}", file=sys.stderr)
+        roots, children = group_sessions(all_sessions)
+        if args.since:
+            cutoff = dt.datetime.fromisoformat(args.since).timestamp() * 1000
+            roots = [s for s in roots if (s.get("time") or {}).get("created", 0) >= cutoff]
+        if args.session:
+            roots = [s for s in roots if s["id"] in set(args.session)]
+        roots_seen += len(roots)
+        done = {sid: (updated, status, scorer) for sid, updated, status, scorer in db.execute(
+            "SELECT session_id, updated_ms, status, scorer_hash FROM sessions WHERE machine = ? AND harness = ?", (machine, name))}
+        pending = [s for s in roots if args.rescore or s["id"] not in done or done[s["id"]][1] == "error"
+                   or done[s["id"]][2] != SCORER_HASH or done[s["id"]][0] != (s.get("time") or {}).get("updated")]
+        todo.extend((oc, s, children.get(s["id"], []), version) for s in pending)
+        print(f"  {len(all_sessions)} {name} sessions ({len(roots)} top-level); {len(pending)} new or changed", file=sys.stderr)
+    if not available:
+        sys.exit("error: no supported harness could be read; checked " + args.harness)
+    version = "; ".join(versions)
+    todo.sort(key=lambda item: -((item[1].get("time") or {}).get("created") or 0))
     if args.limit:
         todo = todo[: args.limit]
-    print(f"{len(all_sessions)} sessions ({len(roots)} top-level); {len(todo)} to score", file=sys.stderr)
+    print(f"{roots_seen} top-level sessions across {available} harness(es); {len(todo)} to score", file=sys.stderr)
 
     # Nothing to score runs fine without a key, so a rerun that only refreshes
     # the report and dashboard needs no credentials.
@@ -1030,9 +1375,13 @@ def cmd_score(args):
         sys.exit("error: set TYPESAFE_API_KEY (get one at https://console.typesafe.ai)")
 
     if args.dry_run:
-        for s in todo[: args.limit or 3]:
+        for oc, s, children, _ in todo[: args.limit or 3]:
             state, metrics, _ = analyze(s, oc.messages(s["id"]))
-            print(json.dumps({"session_id": s["id"], "metrics": metrics, "state": state}, indent=2, ensure_ascii=False))
+            state["work_pattern"]["subagents_launched"] = max(len(children), state["work_pattern"]["subagents_launched"])
+            print(json.dumps({"harness": oc.name, "session_id": s["id"], "metrics": metrics, "state": state}, indent=2, ensure_ascii=False))
+        db.close()
+        if discovery_errors:
+            sys.exit("error: incomplete discovery: " + ", ".join(discovery_errors))
         return
 
     started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -1041,7 +1390,7 @@ def cmd_score(args):
     tokens = 0
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = [pool.submit(score_one, oc, jev, machine, s, children.get(s["id"], []), version) for s in todo]
+        futures = [pool.submit(score_one, oc, jev, machine, s, children, v) for oc, s, children, v in todo]
         for i, fut in enumerate(as_completed(futures), 1):
             row, used = fut.result()
             with lock:
@@ -1053,14 +1402,17 @@ def cmd_score(args):
                     print(f"  {i}/{len(futures)}  scored={counts['scored']} empty={counts['empty']} errors={counts['error']}  {time.time() - t0:.0f}s", file=sys.stderr)
                 if row["status"] == "error":
                     print(f"  error {row['session_id']}: {row['error'][:200]}", file=sys.stderr)
-    db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)", (machine, started, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), version, args.model, SCORER_HASH, len(roots), counts["scored"], counts["error"], tokens))
+    db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)", (machine, started, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), version, args.model, SCORER_HASH, roots_seen, counts["scored"], counts["error"], tokens))
     db.commit()
+    db.close()
     print(f"done: {counts}; Jev input tokens {tokens:,} (~${tokens * 0.042 / 1e6:.4f})", file=sys.stderr)
     print(f"database: {pathlib.Path(args.db).expanduser()}", file=sys.stderr)
     try:
         print(f"dashboard: {render_dashboard(args.db)}", file=sys.stderr)
     except Exception as e:  # the scores are saved either way
         print(f"warning: could not render the dashboard: {e}", file=sys.stderr)
+    if discovery_errors:
+        sys.exit("error: incomplete discovery: " + ", ".join(discovery_errors))
 
 
 def cmd_merge(args):
@@ -1292,7 +1644,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("score", help="score sessions on this machine (default)")
-    s.add_argument("--harness", choices=sorted(HARNESSES), default="opencode", help="which agent harness to read sessions from (default opencode)")
+    s.add_argument("--harness", choices=["all"] + sorted(HARNESSES), default="all", help="read all available supported harnesses (default all), or select one")
     s.add_argument("--db", default=str(DEFAULT_DB), help=f"SQLite output (default {DEFAULT_DB})")
     s.add_argument("--machine", help="machine label stored with each row (default: short hostname)")
     s.add_argument("--model", default=DEFAULT_MODEL, help=f"Jev model; pinned so scores stay comparable over time (default {DEFAULT_MODEL})")

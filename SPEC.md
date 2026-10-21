@@ -26,7 +26,14 @@ bell curve. Most of this spec exists to protect that property.
 
 ## 2. Pipeline
 
-For each machine and harness:
+On each machine, discover every registered supported harness by default
+(`--harness all`), or select one with `--harness <id>`. Skip unavailable harnesses
+with a diagnostic. If reading an available harness fails, process the others and
+exit nonzero after reporting the failure. Apply date/session filters and the
+newest-first `--limit` across the combined set, not independently per harness.
+Write all results to one database and render one combined dashboard.
+
+For each discovered harness:
 
 1. **List sessions** from the harness, read-only. Group child sessions under their parent.
 2. **Skip unchanged sessions**: a session is re-scored only if it is new, its
@@ -50,6 +57,10 @@ example `opencode`, `claude`, `codex`) and three operations:
 - `version()`: the harness version string, stored per row.
 - `sessions()`: every session the harness knows about on this machine, as session records.
 - `messages(session_id)`: the session's messages in order, in the common message format.
+
+The registry's opener raises `HarnessUnavailable` for a missing installation or
+transcripts. Other exceptions are read failures, not silent absence. `sessions()`
+is called before `version()`, so file-based adapters can infer versions during discovery.
 
 Rules:
 
@@ -146,6 +157,8 @@ execution as `execute`, web search as `websearch`, MCP calls as
 ## 4. Subagents and child sessions
 
 - Child sessions are never scored as their own rows.
+- Nested descendants roll up to the top-level root, including their latest update
+  timestamps, so new child activity invalidates a parent's incremental score.
 - Their tokens and cost are added to the parent's `tokens_total` and `cost_usd`.
 - Their count is the parent's `subagent_sessions` and the state's `work_pattern.subagents_launched`.
 - The parent's own `subagent` tool calls appear in `agent_actions`, so Jev sees what was delegated.
@@ -276,7 +289,8 @@ Key facts:
   harness version (column `opencode_version`, named for the first harness).
 - View `human_sessions`: `status = 'scored' AND origin = 'personal_work' AND fork_of IS NULL AND launched_by_program = 0`.
   Every report and chart uses this view by default.
-- `runs`: one row per scoring run.
+- `runs`: one row per scoring run; an all-harness run records the discovered
+  harness names and versions together in the legacy `opencode_version` field.
 - New columns are added with `ALTER TABLE … ADD COLUMN` on open. `merge` copies
   only the columns an input has, so older databases still merge.
 
