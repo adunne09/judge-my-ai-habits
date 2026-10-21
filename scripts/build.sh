@@ -20,8 +20,10 @@ if sys.version_info < (3, 9):
     sys.exit("Python 3.9+ is required.")
 root, version, output = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", version):
-    sys.exit("Version must look like v0.1.0 or v0.1.0-rc.1.")
+    sys.exit("Version must look like v0.2.0 or v0.2.0-rc.1.")
 output.mkdir(parents=True, exist_ok=True)
+if any(p.name not in {"judge-my-ai-habits.tar.gz", "run.sh", "SHA256SUMS"} for p in output.iterdir()):
+    sys.exit("Output directory contains other files; choose a new output directory.")
 archive = output / "judge-my-ai-habits.tar.gz"
 # An explicit allowlist keeps local sessions, databases, and credentials out.
 files = {
@@ -36,14 +38,14 @@ with archive.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=ra
             info = tarfile.TarInfo("judge-my-ai-habits/" + name)
             info.size, info.mode, info.mtime = len(data), mode, 0
             tar.addfile(info, io.BytesIO(data))
-installer = output / "install.sh"
-installer.write_bytes((root / "scripts/install.sh").read_bytes())
-installer.chmod(0o755)
+runner = output / "run.sh"
+runner.write_bytes((root / "scripts/run.sh").read_bytes())
+runner.chmod(0o755)
 manifest = output / "SHA256SUMS"
 manifest.write_text("".join(
     f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
-    for p in (archive, installer)
+    for p in (archive, runner)
 ))
-for p in (archive, installer, manifest):
+for p in (archive, runner, manifest):
     print(p.resolve())
 PY
