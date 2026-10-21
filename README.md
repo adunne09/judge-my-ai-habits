@@ -47,8 +47,8 @@ records. Compare your last 30 days with earlier work and explore individual sess
 your own sessions and shows harness/machine filters when multiple are present.*
 
 Every completed scoring run (except `--dry-run`) also writes a self-contained,
-interactive HTML dashboard and prints its path. It has no external requests and
-works offline.
+interactive HTML dashboard, prints its path, and in a terminal asks whether to
+open it. It has no external requests and works offline.
 
 <details>
 <summary>Explore the dashboard controls and example charts</summary>
@@ -191,8 +191,8 @@ can be reimplemented for any agent client.
 To add another harness, see
 [Add support for another harness](#add-support-for-another-harness).
 
-The default is **`--harness all`**: discover every supported harness, score new
-or changed sessions into the same database, and render one combined dashboard.
+The default is **`--harness all`**: discover every supported harness, score sessions
+not yet scored into the same database, and render one combined dashboard.
 No separate runs or merge step are needed on one machine. Missing installations
 or transcripts are reported and skipped. A harness that fails to read is
 reported separately; the others still run, then the command exits nonzero so an
@@ -380,7 +380,7 @@ scoring runs work without one.
 
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai
-./judge-my-ai-habits                   # discover all supported harnesses, score updates, render one dashboard
+./judge-my-ai-habits                   # discover all supported harnesses, score new sessions, render one dashboard
 ./judge-my-ai-habits --harness codex   # optional: only Codex
 ./judge-my-ai-habits report            # recent change, histograms, tokens, and a monthly trend
 ./judge-my-ai-habits report --by week
@@ -433,13 +433,23 @@ with `--db`; `$XDG_DATA_HOME` overrides `~/.local/share` when set. Each row is k
 records its `harness`. `machine` is the short hostname; override it with
 `--machine`.
 
-Runs are incremental. A session is only sent to Jev again if it changed since its
-last score, if its last attempt failed, or if the questions changed. A full first
+Runs are incremental, so a rerun only pays for sessions Jev hasn't judged yet.
+A session is sent to Jev only if it is new, if its last attempt failed, if it was
+empty last time and has changed since, or if the questions changed (a new scorer
+hash; scores from different question sets aren't comparable). A session that was
+already scored is skipped even if it grew afterwards, and keeps its stored row; use
+`--rescore-changed` to rescore those too. Each run prints the split, for example
+`1,324 already scored, skipped; 3 new to score`. A full first
 run on about 1,260 sessions took about a minute and used 3.4M Jev input tokens,
 about $0.14.
 
 Changing adapter code or `--model` alone does not invalidate existing rows. Use
-`--rescore` to apply those changes to unchanged sessions too.
+`--rescore` to apply those changes to every session.
+
+At the end of an interactive run (stdin and stdout are a terminal), the script asks
+`Open the dashboard in your browser? [Y/n]`. Enter opens it; `n`, Ctrl-C, or
+Ctrl-D doesn't. Pipes, scripts, and CI are never asked. `--open` opens without
+asking and `--no-open` skips the question; `dashboard` takes the same flags.
 
 Other `score` options:
 
@@ -449,8 +459,10 @@ Other `score` options:
 | `--since 2026-09-01` | Only sessions created on or after that date |
 | `--limit N` | Score at most N sessions total across selected harnesses, newest first |
 | `--session <id>` | Score specific sessions (repeatable) |
-| `--rescore` | Score again even if nothing changed |
-| `--dry-run` | Print pending sessions' states and metrics without calling Jev; defaults to three sessions, or `--limit N`. Add `--rescore` to inspect unchanged sessions |
+| `--rescore` | Score every session again, even ones already scored |
+| `--rescore-changed` | Also rescore scored sessions that grew since they were scored |
+| `--open`, `--no-open` | Open the dashboard at the end without asking, or don't ask |
+| `--dry-run` | Print pending sessions' states and metrics without calling Jev; defaults to three sessions, or `--limit N`. Add `--rescore` to inspect sessions already scored |
 | `--workers 6` | Parallel sessions |
 | `--model jev-1.13.0` | Jev model, pinned on purpose (see below) |
 

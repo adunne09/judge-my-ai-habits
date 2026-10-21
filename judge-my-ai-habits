@@ -1321,6 +1321,61 @@ def group_sessions(sessions):
     return roots, children
 
 
+def rescore_reason(prev, updated_ms, rescore=False, rescore_changed=False):
+    """Why a top-level session is or isn't sent to Jev on this run.
+
+    prev is the stored (updated_ms, status, scorer_hash) or None. A successfully
+    scored session is never sent again on its own: that would spend Jev calls on
+    work already judged. It is rescored only when the question set changed
+    (SCORER_HASH; scores from different question sets aren't comparable), or when
+    asked for with --rescore, or --rescore-changed for sessions that grew since.
+    """
+    if prev is None:
+        return "new"
+    if rescore:
+        return "rescore"
+    stored_updated, status, scorer = prev
+    if status == "error":
+        return "retry"
+    if scorer != SCORER_HASH:
+        return "questions"
+    if stored_updated != updated_ms:
+        if status == "scored":
+            return "changed" if rescore_changed else "grown"
+        return "recheck"  # empty last time; only costs a Jev call if it now has a conversation
+    return "scored" if status == "scored" else "empty"
+
+
+SCORE_REASONS = {
+    "new": "new",
+    "retry": "failed last time",
+    "questions": "question set changed",
+    "changed": "grew since scored",
+    "recheck": "empty last time, since changed",
+    "rescore": "--rescore",
+}
+
+
+def describe_pending(why, limit=None):
+    """One line: how many sessions are skipped and how many go to Jev, and why."""
+    parts = []
+    if why.get("scored"):
+        parts.append(f"{why['scored']:,} already scored, skipped")
+    if why.get("grown"):
+        parts.append(f"{why['grown']:,} scored but grown since, kept as scored (--rescore-changed to update)")
+    if why.get("empty"):
+        parts.append(f"{why['empty']:,} empty, skipped")
+    todo = sum(why.get(r, 0) for r in SCORE_REASONS)
+    if todo == why.get("new", 0):
+        parts.append(f"{todo:,} new to score")
+    else:
+        detail = ", ".join(f"{why[r]:,} {label}" for r, label in SCORE_REASONS.items() if why.get(r))
+        parts.append(f"{todo:,} to score" + (f" ({detail})" if detail else ""))
+    if limit is not None and limit < todo:
+        parts.append(f"scoring the newest {limit:,} (--limit)")
+    return "; ".join(parts)
+
+
 def cmd_score(args):
     api_key = os.environ.get("TYPESAFE_API_KEY")
     machine = args.machine or socket.gethostname().split(".")[0]
@@ -1328,6 +1383,7 @@ def cmd_score(args):
     jev = Jev(api_key or "", args.model)
 
     todo, versions, discovery_errors = [], [], []
+    skip_counts = {}
     roots_seen, available = 0, 0
     for name in HARNESSES if args.harness == "all" else [args.harness]:
         try:
@@ -1357,17 +1413,23 @@ def cmd_score(args):
         roots_seen += len(roots)
         done = {sid: (updated, status, scorer) for sid, updated, status, scorer in db.execute(
             "SELECT session_id, updated_ms, status, scorer_hash FROM sessions WHERE machine = ? AND harness = ?", (machine, name))}
-        pending = [s for s in roots if args.rescore or s["id"] not in done or done[s["id"]][1] == "error"
-                   or done[s["id"]][2] != SCORER_HASH or done[s["id"]][0] != (s.get("time") or {}).get("updated")]
+        pending, why = [], {}
+        for s in roots:
+            reason = rescore_reason(done.get(s["id"]), (s.get("time") or {}).get("updated"), args.rescore, args.rescore_changed)
+            why[reason] = why.get(reason, 0) + 1
+            if reason in SCORE_REASONS:
+                pending.append(s)
         todo.extend((oc, s, children.get(s["id"], []), version) for s in pending)
-        print(f"  {len(all_sessions)} {name} sessions ({len(roots)} top-level); {len(pending)} new or changed", file=sys.stderr)
+        for reason in why:
+            skip_counts[reason] = skip_counts.get(reason, 0) + why[reason]
+        print(f"  {len(all_sessions)} {name} sessions ({len(roots)} top-level): {describe_pending(why)}", file=sys.stderr)
     if not available:
         sys.exit("error: no supported harness could be read; checked " + args.harness)
     version = "; ".join(versions)
     todo.sort(key=lambda item: -((item[1].get("time") or {}).get("created") or 0))
     if args.limit:
         todo = todo[: args.limit]
-    print(f"{roots_seen} top-level sessions across {available} harness(es); {len(todo)} to score", file=sys.stderr)
+    print(f"{roots_seen:,} top-level sessions across {available} harness(es): {describe_pending(skip_counts, args.limit)}", file=sys.stderr)
 
     # Nothing to score runs fine without a key, so a rerun that only refreshes
     # the report and dashboard needs no credentials.
@@ -1408,9 +1470,13 @@ def cmd_score(args):
     print(f"done: {counts}; Jev input tokens {tokens:,} (~${tokens * 0.042 / 1e6:.4f})", file=sys.stderr)
     print(f"database: {pathlib.Path(args.db).expanduser()}", file=sys.stderr)
     try:
-        print(f"dashboard: {render_dashboard(args.db)}", file=sys.stderr)
+        dashboard = render_dashboard(args.db)
+        print(f"dashboard: {dashboard}", file=sys.stderr)
     except Exception as e:  # the scores are saved either way
+        dashboard = None
         print(f"warning: could not render the dashboard: {e}", file=sys.stderr)
+    if dashboard:
+        offer_to_open(dashboard, args.open)
     if discovery_errors:
         sys.exit("error: incomplete discovery: " + ", ".join(discovery_errors))
 
@@ -1481,11 +1547,43 @@ def render_dashboard(db_path, out=None, recent_days=30, baseline_days=180):
     return out
 
 
+def open_in_browser(path):
+    """Open a local file in the default browser without blocking or raising."""
+    path = pathlib.Path(path).resolve()
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=False)
+        elif os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif shutil.which("xdg-open"):
+            subprocess.run(["xdg-open", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            import webbrowser
+            if not webbrowser.open(path.as_uri()):
+                raise OSError("no browser found")
+    except Exception as e:
+        print(f"warning: could not open the dashboard ({e}); open {path} yourself", file=sys.stderr)
+
+
+def offer_to_open(path, choice=None):
+    """--open opens, --no-open doesn't; otherwise ask, but only in an interactive terminal."""
+    if choice is None:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return  # scripts, pipes, and CI never wait on a question
+        try:
+            answer = input("Open the dashboard in your browser? [Y/n] ")
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return
+        choice = answer.strip().lower() in ("", "y", "yes")
+    if choice:
+        open_in_browser(path)
+
+
 def cmd_dashboard(args):
     path = render_dashboard(args.db, args.output, args.recent_days, args.baseline_days)
     print(path)
-    if args.open:
-        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(path)], check=False)
+    offer_to_open(path, args.open)
 
 
 def human_tokens(n):
@@ -1640,6 +1738,14 @@ def cmd_report(args):
         print(f"  {p}  n={n:4d}  complexity mean={mean:.2f} sd={sd:.2f} median={med:.2f}  tokens={human_tokens(sum(r[4] for r in rs if r[4] is not None)):>7}  {'▇' * round(mean * 8)}")
 
 
+def add_open_flags(parser):
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument("--open", dest="open", action="store_const", const=True, default=None,
+                   help="open the dashboard in the default browser without asking")
+    g.add_argument("--no-open", dest="open", action="store_const", const=False,
+                   help="don't open the dashboard or ask (the question is only asked in an interactive terminal)")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd")
@@ -1652,8 +1758,10 @@ def main():
     s.add_argument("--since", help="only sessions created on or after this date (YYYY-MM-DD)")
     s.add_argument("--limit", type=int, help="score at most N sessions (newest first)")
     s.add_argument("--session", action="append", help="score only this session id (repeatable)")
-    s.add_argument("--rescore", action="store_true", help="rescore sessions even if unchanged")
+    s.add_argument("--rescore", action="store_true", help="rescore every session, even ones already scored")
+    s.add_argument("--rescore-changed", action="store_true", help="also rescore scored sessions that grew since they were scored")
     s.add_argument("--dry-run", action="store_true", help="print the state Jev would see, without calling Jev")
+    add_open_flags(s)
     m = sub.add_parser("merge", help="merge databases from several machines into one")
     m.add_argument("inputs", nargs="+")
     m.add_argument("-o", "--output", required=True)
@@ -1670,7 +1778,7 @@ def main():
     d.add_argument("-o", "--output", help="where to write the HTML (default: dashboard.html next to the database)")
     d.add_argument("--recent-days", type=int, default=30, help="initial recent window (default 30; changeable in the page)")
     d.add_argument("--baseline-days", type=int, default=180, help="initial baseline window (default 180; changeable in the page)")
-    d.add_argument("--open", action="store_true", help="open it in the default browser")
+    add_open_flags(d)
     argv = sys.argv[1:]
     if not argv or argv[0] not in ("score", "merge", "report", "dashboard", "-h", "--help"):
         argv = ["score"] + argv

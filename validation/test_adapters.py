@@ -202,7 +202,7 @@ class MultiHarnessTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db_path = pathlib.Path(self.tmp.name) / "test.sqlite"
         self.args = argparse.Namespace(harness="all", db=str(self.db_path), machine="test", model=sc.DEFAULT_MODEL,
-            dry_run=False, since=None, session=None, rescore=False, limit=None, workers=2)
+            dry_run=False, since=None, session=None, rescore=False, rescore_changed=False, limit=None, workers=2, open=False)
         self.calls = []
 
     def harness(self, name, created):
@@ -279,6 +279,73 @@ class MultiHarnessTests(unittest.TestCase):
         with patch("sys.argv", ["judge-my-ai-habits"]), patch.object(sc, "cmd_score") as score:
             sc.main()
         self.assertEqual(score.call_args.args[0].harness, "all")
+        self.assertIsNone(score.call_args.args[0].open)
+
+    def test_scored_sessions_cost_no_jev_calls_on_rerun(self):
+        stamp = {"updated": 1000}
+        class Adapter:
+            name = "codex"
+            def version(self):
+                return "test"
+            def sessions(self):
+                return [{"id": "codex:s", "time": {"created": 1000, "updated": stamp["updated"]}, "tokens": None}]
+            def messages(self, sid):
+                return []
+        registry = {"codex": lambda: Adapter()}
+        self.run_score(registry)
+        self.assertEqual(self.calls, ["codex"])
+        self.calls.clear()
+        stamp["updated"] = 2000  # the session grew after it was scored
+        self.run_score(registry)
+        self.assertEqual(self.calls, [])
+        self.args.rescore_changed = True
+        self.run_score(registry)
+        self.assertEqual(self.calls, ["codex"])
+        self.calls.clear()
+        self.args.rescore_changed = False
+        self.run_score(registry)
+        self.assertEqual(self.calls, [])
+
+    def test_rescore_reasons(self):
+        h = sc.SCORER_HASH
+        self.assertEqual(sc.rescore_reason(None, 1), "new")
+        self.assertEqual(sc.rescore_reason((1, "scored", h), 1), "scored")
+        self.assertEqual(sc.rescore_reason((1, "scored", h), 2), "grown")
+        self.assertEqual(sc.rescore_reason((1, "scored", h), 2, rescore_changed=True), "changed")
+        self.assertEqual(sc.rescore_reason((1, "scored", "old"), 1), "questions")
+        self.assertEqual(sc.rescore_reason((1, "error", h), 1), "retry")
+        self.assertEqual(sc.rescore_reason((1, "empty", h), 1), "empty")
+        self.assertEqual(sc.rescore_reason((1, "empty", h), 2), "recheck")
+        self.assertEqual(sc.rescore_reason((1, "scored", h), 1, rescore=True), "rescore")
+        self.assertEqual(sc.describe_pending({"scored": 1345, "new": 3}), "1,345 already scored, skipped; 3 new to score")
+
+
+class OpenPromptTests(unittest.TestCase):
+    def offer(self, choice=None, tty=True, answer=""):
+        opened = []
+        def fake_input(prompt):
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        with patch.object(sc, "open_in_browser", opened.append), patch("builtins.input", fake_input), \
+                patch("sys.stdin.isatty", lambda: tty), patch("sys.stdout.isatty", lambda: tty), \
+                contextlib.redirect_stderr(io.StringIO()):
+            sc.offer_to_open("/tmp/dashboard.html", choice)
+        return bool(opened)
+
+    def test_enter_and_yes_open(self):
+        self.assertTrue(self.offer(answer=""))
+        self.assertTrue(self.offer(answer=" Y "))
+
+    def test_no_eof_and_ctrl_c_do_not_open(self):
+        self.assertFalse(self.offer(answer="n"))
+        self.assertFalse(self.offer(answer=EOFError()))
+        self.assertFalse(self.offer(answer=KeyboardInterrupt()))
+
+    def test_flags_and_non_tty_never_ask(self):
+        self.assertTrue(self.offer(choice=True, tty=False, answer=EOFError()))
+        self.assertFalse(self.offer(choice=False, answer=""))
+        self.assertFalse(self.offer(tty=False, answer=""))
 
 
 if __name__ == "__main__":

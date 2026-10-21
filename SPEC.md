@@ -36,8 +36,12 @@ Write all results to one database and render one combined dashboard.
 For each discovered harness:
 
 1. **List sessions** from the harness, read-only. Group child sessions under their parent.
-2. **Skip unchanged sessions**: a session is re-scored only if it is new, its
-   `updated` time changed, its last attempt errored, or the scorer hash changed.
+2. **Skip sessions already judged**: a session is sent to Jev only if it is new,
+   its last attempt errored, it was empty last time and its `updated` time
+   changed, or the scorer hash changed. A successfully scored session is not sent
+   again just because its `updated` time changed (it grew after scoring); it keeps
+   its stored row unless the user opts in (`--rescore-changed`, or `--rescore` for
+   everything). Print how many sessions were skipped and how many go to Jev.
 3. **Normalize** each top-level session's messages into the common message format (section 4).
 4. **Build the state** (section 5) and compute deterministic metrics.
 5. **Ask Jev** all questions in one request (section 6).
@@ -158,7 +162,8 @@ execution as `execute`, web search as `websearch`, MCP calls as
 
 - Child sessions are never scored as their own rows.
 - Nested descendants roll up to the top-level root, including their latest update
-  timestamps, so new child activity invalidates a parent's incremental score.
+  timestamps, so new child activity marks the parent as changed (rescored only with
+  `--rescore-changed`).
 - Their tokens and cost are added to the parent's `tokens_total` and `cost_usd`.
 - Their count is the parent's `subagent_sessions` and the state's `work_pattern.subagents_launched`.
 - The parent's own `subagent` tool calls appear in `agent_actions`, so Jev sees what was delegated.
