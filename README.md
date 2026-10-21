@@ -312,6 +312,22 @@ machine's rows. Databases created by older versions merge too. If the inputs
 were scored with different questions or models, the merge prints a warning,
 because those scores aren't directly comparable.
 
+## What the database contains (and doesn't)
+
+The database is safe to copy to another machine as is. Each row holds the
+analytics and nothing about what the work was:
+
+- **Contains:** session id, harness, machine label, model names, timestamps
+  and calendar buckets, message / tool-call / subagent / file counts, active
+  and wall time, token and cost totals, the Jev scores and answer
+  probabilities, and the scorer and model versions that produced them.
+- **Does not contain:** session titles, working directories, or project ids.
+  The scorer reads them while it works (Jev judges partly from the title and
+  the action summary), but they are dropped before anything is written, and
+  the dashboard — which reads only the database — shows none of them either.
+  Databases created by older versions are stripped and vacuumed the next time
+  this script opens them, so an old copy becomes shareable without a rebuild.
+
 DuckDB can also read all of them together without merging:
 
 ```sql
@@ -563,7 +579,7 @@ SELECT month, ROUND(AVG(complexity), 2) AS mean_complexity,
 FROM human_sessions GROUP BY month ORDER BY month;
 
 -- Your most complex sessions
-SELECT day, machine, harness, ROUND(complexity, 2) AS complexity, title
+SELECT day, machine, harness, ROUND(complexity, 2) AS complexity, session_id
 FROM human_sessions ORDER BY complexity DESC LIMIT 20;
 ```
 

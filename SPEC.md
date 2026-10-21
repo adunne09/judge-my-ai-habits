@@ -261,6 +261,11 @@ Key facts:
 - Primary key `(machine, session_id)`. `machine` is the short hostname, overridable.
 - `harness` records the adapter name. Incremental checks filter on `machine` and `harness`.
 - `status` is `scored`, `empty`, or `error` (with `error` text; errors are retried next run).
+- Privacy: the database holds analytics only. `title`, `directory`, and
+  `project_id` exist in the schema so older databases merge cleanly, but they
+  are never written; any values from an older database are stripped (and the
+  file vacuumed) the next time the script opens it. The merge drops them from
+  inputs too. The database can therefore be copied to another machine as is.
 - Scores: `complexity`, `complexity_p0` … `complexity_p6`, `complexity_confidence`,
   `leverage`, `scope`, `expertise`, `systems`, `open_endedness`, `origin` and its
   probabilities, plus the full answers in `answers_json`.

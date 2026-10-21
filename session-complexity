@@ -782,9 +782,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   machine TEXT NOT NULL,
   session_id TEXT NOT NULL,
   harness TEXT DEFAULT 'opencode', -- which agent harness the session came from (see SPEC.md)
-  title TEXT,
-  directory TEXT,
-  project_id TEXT,
+  title TEXT,                 -- privacy: never stored; the column exists so old databases merge cleanly
+  directory TEXT,             -- privacy: never stored
+  project_id TEXT,            -- privacy: never stored
   agent TEXT,
   model TEXT,
   models_used TEXT,
@@ -848,6 +848,8 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+REDACTED_COLUMNS = ("title", "directory", "project_id")  # free text about the work: used at runtime, never stored
+
 COLUMNS = [
     "machine", "session_id", "harness", "title", "directory", "project_id", "agent", "model", "models_used", "fork_of", "launched_by_program", "launch_source",
     "created_at", "created_ms", "updated_ms", "day", "week", "month", "outcome",
@@ -872,13 +874,26 @@ def connect(path: pathlib.Path):
     for col, decl in (("complexity_p6", "REAL"), ("leverage", "REAL"), ("harness", "TEXT DEFAULT 'opencode'")):
         if col not in have:
             db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+    # Privacy: the database holds only analytics, so it can be copied to another
+    # machine as is. Titles, working directories, and project ids are used while
+    # scoring but never written; databases from before this rule are stripped on
+    # first open (VACUUM so the text is physically gone, not just NULL).
+    stale = db.execute(
+        "SELECT COUNT(*) FROM sessions WHERE title IS NOT NULL OR directory IS NOT NULL OR project_id IS NOT NULL"
+    ).fetchone()[0]
+    if stale:
+        db.execute("UPDATE sessions SET title = NULL, directory = NULL, project_id = NULL")
+        db.commit()
+        db.execute("VACUUM")
+        print(f"privacy: stripped titles, directories, and project ids from {stale} rows; this database never stores them", file=sys.stderr)
     return db
 
 
 def upsert(db, row):
+    values = [None if c in REDACTED_COLUMNS else row.get(c) for c in COLUMNS]
     db.execute(
         f"INSERT OR REPLACE INTO sessions ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})",
-        [row.get(c) for c in COLUMNS],
+        values,
     )
 
 
@@ -974,8 +989,6 @@ def score_one(oc, jev, machine, session, children, opencode_version):
 
 def cmd_score(args):
     api_key = os.environ.get("TYPESAFE_API_KEY")
-    if not api_key and not args.dry_run:
-        sys.exit("error: set TYPESAFE_API_KEY (get one at https://console.typesafe.ai)")
     oc = HARNESSES[args.harness]()
     version = oc.version()
     machine = args.machine or socket.gethostname().split(".")[0]
@@ -1011,6 +1024,11 @@ def cmd_score(args):
     if args.limit:
         todo = todo[: args.limit]
     print(f"{len(all_sessions)} sessions ({len(roots)} top-level); {len(todo)} to score", file=sys.stderr)
+
+    # Nothing to score runs fine without a key, so a rerun that only refreshes
+    # the report and dashboard needs no credentials.
+    if todo and not api_key and not args.dry_run:
+        sys.exit("error: set TYPESAFE_API_KEY (get one at https://console.typesafe.ai)")
 
     if args.dry_run:
         for s in todo[: args.limit or 3]:
@@ -1051,8 +1069,9 @@ def cmd_merge(args):
     for src in args.inputs:
         out.execute("ATTACH DATABASE ? AS src", (str(pathlib.Path(src).expanduser()),))
         # Inputs may predate newer columns; copy the shared ones and let defaults fill the rest.
+        # Titles, directories, and project ids are never copied: a database stays shareable after a merge.
         have = {r[1] for r in out.execute("PRAGMA src.table_info(sessions)")}
-        cols = ",".join(c for c in COLUMNS if c in have)
+        cols = ",".join(c for c in COLUMNS if c in have and c not in REDACTED_COLUMNS)
         n = out.execute(f"INSERT OR REPLACE INTO sessions ({cols}) SELECT {cols} FROM src.sessions").rowcount
         try:
             out.execute("INSERT INTO runs SELECT * FROM src.runs")
@@ -1073,22 +1092,22 @@ DASHBOARD_TEMPLATE = pathlib.Path(__file__).resolve().parent / "dashboard.html"
 
 
 def dashboard_payload(db, db_path, recent_days=30, baseline_days=180):
-    cols = ("session_id, harness, machine, title, created_ms, complexity, leverage, tokens_total, cost_usd, origin, fork_of, launched_by_program, "
+    cols = ("session_id, harness, machine, created_ms, complexity, leverage, tokens_total, cost_usd, origin, fork_of, launched_by_program, "
             "scope, expertise, systems, open_endedness, " + ", ".join(f"complexity_p{i}" for i in range(7)) +
-            ", tool_calls, subagent_sessions, user_messages, active_seconds, directory, jev_model, scorer_hash")
+            ", tool_calls, subagent_sessions, user_messages, active_seconds, jev_model, scorer_hash")
     r2 = lambda v, n=3: None if v is None else round(v, n)  # noqa: E731
     sessions = []
     for r in db.execute(f"SELECT {cols} FROM sessions WHERE status = 'scored' AND complexity IS NOT NULL"):
-        (sid, harness, machine, title, created, cx, lev, tokens, cost, origin, fork, launched,
+        (sid, harness, machine, created, cx, lev, tokens, cost, origin, fork, launched,
          scope, expertise, systems, open_e, *rest) = r
-        probs, (tools, subs, users, active, directory, _, _) = rest[:7], rest[7:]
+        probs, (tools, subs, users, active, _, _) = rest[:7], rest[7:]
         sessions.append({
-            "id": sid, "h": harness or "opencode", "m": machine, "ti": title, "t": created,
+            "id": sid, "h": harness or "opencode", "m": machine, "t": created,
             "c": r2(cx), "l": r2(lev), "k": tokens, "$": r2(cost, 4), "o": origin or "unknown",
             "f": int(bool(fork)), "lp": int(bool(launched)),
             "p": int(origin == "personal_work" and not fork and not launched),
             "sc": r2(scope, 2), "ex": r2(expertise, 2), "sy": r2(systems, 2), "oe": r2(open_e, 2),
-            "pr": [r2(p) for p in probs], "tc": tools, "sa": subs, "um": users, "as": active, "d": directory,
+            "pr": [r2(p) for p in probs], "tc": tools, "sa": subs, "um": users, "as": active,
         })
     models = [m for (m,) in db.execute("SELECT DISTINCT jev_model FROM sessions WHERE status='scored' AND jev_model IS NOT NULL")]
     scorers = [h for (h,) in db.execute("SELECT DISTINCT scorer_hash FROM sessions WHERE status='scored' AND scorer_hash IS NOT NULL")]

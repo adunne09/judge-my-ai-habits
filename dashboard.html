@@ -265,7 +265,7 @@ footer { margin-top: 30px; font: 11px var(--mono); color: var(--ink3); line-heig
   <div class="card sessions">
     <div class="panel-head">
       <div><h3>Sessions</h3><p id="tbl-desc"></p></div>
-      <div class="tbl-tools"><span id="fchip"></span><input type="search" id="q" placeholder="Search titles…"></div>
+      <div class="tbl-tools"><span id="fchip"></span><input type="search" id="q" placeholder="Search ids…"></div>
     </div>
     <div class="tbl-wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
     <div class="more" id="more"></div>
@@ -482,7 +482,7 @@ function renderStandouts() {
     ["Most tokens", top((s) => s.k), (s) => tok(s.k), "#fbbf24"],
   ];
   el.innerHTML = items.map(([k, s, v, c], i) => `<div class="card st" data-i="${i}"><div class="st-k"><span>${k}</span><span>${where}</span></div>
-    <div class="st-v" style="color:${c}">${v(s)}</div><div class="st-t">${esc(s.ti || "(untitled)")}</div><div class="st-d">${fmtShort(s.t)} · ${tok(s.k)} tokens</div></div>`).join("");
+    <div class="st-v" style="color:${c}">${v(s)}</div><div class="st-t">${esc(s.id)}</div><div class="st-d">${esc(s.h)} · ${fmtShort(s.t)} · ${tok(s.k)} tokens</div></div>`).join("");
   el.querySelectorAll(".st").forEach((n) => (n.onclick = () => openDrawer(items[Number(n.dataset.i)][1])));
 }
 
@@ -612,7 +612,7 @@ function renderScatter() {
   const byId = new Map(xs.map((s) => [s.id, s]));
   box.querySelectorAll(".dot").forEach((d) => {
     const s = byId.get(d.dataset.id);
-    d.addEventListener("mousemove", (e) => showTip(e, `<b>${esc(s.ti || "(untitled)")}</b><div class="row"><span>${fmtDate(s.t)}</span><span>${esc(s.h)}</span></div><div class="row"><span>complexity</span><span>${s.c.toFixed(2)}</span></div><div class="row"><span>leverage</span><span>${s.l.toFixed(2)}</span></div><div class="row"><span>tokens</span><span>${tok(s.k)}</span></div>`));
+    d.addEventListener("mousemove", (e) => showTip(e, `<b>${fmtDate(s.t)}</b><div class="row"><span>${esc(s.h)} · ${esc(s.m)}</span><span>${esc(s.id)}</span></div><div class="row"><span>complexity</span><span>${s.c.toFixed(2)}</span></div><div class="row"><span>leverage</span><span>${s.l.toFixed(2)}</span></div><div class="row"><span>tokens</span><span>${tok(s.k)}</span></div>`));
     d.addEventListener("mouseleave", hideTip);
     d.addEventListener("click", () => openDrawer(s));
   });
@@ -677,7 +677,7 @@ function filtered() {
     const [kind, range] = state.filter.split(":"), [a, b] = range.split("-").map(Number);
     xs = xs.filter((s) => { const v = kind === "c" ? s.c : kind === "l" ? s.l : s.t; return v != null && v >= a && (v < b || (kind !== "t" && b >= (kind === "c" ? 6 : 5) && v <= b)); });
   }
-  if (state.q) { const q = state.q.toLowerCase(); xs = xs.filter((s) => (s.ti || "").toLowerCase().includes(q)); }
+  if (state.q) { const q = state.q.toLowerCase(); xs = xs.filter((s) => (s.id + " " + s.h + " " + s.m).toLowerCase().includes(q)); }
   const k = state.sort, dir = Number(state.dir);
   return [...xs].sort((a, b) => ((a[k] ?? -1) - (b[k] ?? -1)) * dir || (b.t - a.t));
 }
@@ -692,14 +692,14 @@ function renderTable() {
   $("fchip").innerHTML = state.filter ? `<span class="filter-chip">${esc(filterLabel())}<button id="clearf" title="Clear filter">×</button></span>` : "";
   if (state.filter) $("clearf").onclick = () => { state.filter = ""; render(); };
   $("tbl-desc").textContent = `${xs.length.toLocaleString()} session${xs.length === 1 ? "" : "s"}${state.filter || state.q ? " match" : " in this view"}. Click one for details.`;
-  const cols = [["t", "Date", ""], ["ti", "Session", ""], ["c", "Complexity", "num"], ["l", "Leverage", "num"], ["k", "Tokens", "num"]];
+  const cols = [["t", "Date", ""], ["id", "Session id", ""], ["c", "Complexity", "num"], ["l", "Leverage", "num"], ["k", "Tokens", "num"]];
   $("thead").innerHTML = "<tr>" + cols.map(([k, l, c]) => `<th class="${c}" data-k="${k}">${l}${state.sort === k ? ` <span class="arrow">${state.dir === "-1" ? "↓" : "↑"}</span>` : ""}</th>`).join("") + "</tr>";
-  document.querySelectorAll("#thead th").forEach((th) => (th.onclick = () => { const k = th.dataset.k; if (k === "ti") return; state.dir = state.sort === k && state.dir === "-1" ? "1" : "-1"; state.sort = k; render(); }));
+  document.querySelectorAll("#thead th").forEach((th) => (th.onclick = () => { const k = th.dataset.k; if (k === "id") return; state.dir = state.sort === k && state.dir === "-1" ? "1" : "-1"; state.sort = k; render(); }));
   const kmax = Math.max(1, ...xs.map((s) => s.k || 0));
   $("tbody").innerHTML = xs.slice(0, limit).map((s) => {
     const win = w && s.t >= w.rLo ? '<span class="tag r">recent</span>' : w && w.base.length && s.t >= w.bLo && s.t < w.bHi ? '<span class="tag b">baseline</span>' : "";
     const extra = (multiH ? `<span class="tag">${esc(s.h)}</span>` : "") + (multiM ? `<span class="tag">${esc(s.m)}</span>` : "") + (!s.p ? `<span class="tag">${esc(s.o === "personal_work" ? (s.f ? "fork" : "launched") : s.o.replace(/_/g, " "))}</span>` : "");
-    return `<tr data-id="${esc(s.id)}"><td>${fmtShort(s.t)}</td><td class="title">${esc(s.ti || "(untitled)")}${win}${extra}</td>
+    return `<tr data-id="${esc(s.id)}"><td>${fmtShort(s.t)}</td><td class="title"><code class="id">${esc(s.id)}</code>${win}${extra}</td>
       <td class="num"><span class="meter"><i style="width:${(s.c / 6) * 70}px"></i>${s.c.toFixed(2)}</span></td><td class="num">${s.l == null ? "—" : s.l.toFixed(2)}</td>
       <td class="num"><span class="meter"><i style="width:${s.k ? Math.sqrt(s.k / kmax) * 50 : 0}px;background:linear-gradient(90deg,#b45309,#fbbf24)"></i>${tok(s.k)}</span></td></tr>`;
   }).join("") || `<tr><td colspan="5" class="empty">No sessions match.</td></tr>`;
@@ -715,8 +715,8 @@ function openDrawer(s) {
   const flags = [s.o.replace(/_/g, " "), s.f ? "fork" : null, s.lp ? "launched by a program" : null].filter(Boolean).join(" · ");
   $("drawer").innerHTML = `<button class="btn x" id="dx">Close</button>
     <div class="meta">${fmtDate(s.t, { weekday: "short", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</div>
-    <h4>${esc(s.ti || "(untitled)")}</h4>
-    <div class="meta">${esc(s.h)} · ${esc(s.m)}${s.d ? " · " + esc(s.d) : ""}<br>${esc(flags)}${s.p ? " · counted as personal" : " · not in the personal set"}</div>
+    <h4>${esc(s.h)} · ${esc(s.m)}</h4>
+    <div class="meta">${esc(flags)}${s.p ? " · counted as personal" : " · not in the personal set"}</div>
     <div class="big2"><div><div class="l">Complexity</div><div class="v">${s.c.toFixed(2)}</div><div class="l">${CX[Math.round(s.c)]}</div></div>
       <div><div class="l">Leverage</div><div class="v">${s.l == null ? "—" : s.l.toFixed(2)}</div><div class="l">${s.l == null ? "" : LV_LONG[Math.round(s.l)]}</div></div></div>
     <div class="sect">How Jev split its judgment</div>
