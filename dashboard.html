@@ -149,8 +149,6 @@ footer code { font: 12px var(--mono); }
   <div class="top"><span class="name">judge my ai habits</span><span id="gen"></span></div>
   <div class="controls" id="controls">
     <span class="sel"><select id="set"><option value="personal">personal sessions</option><option value="all">all scored sessions</option></select></span>
-    ·
-    <span class="sel"><select id="range"><option value="all">all time</option><option value="365">last year</option><option value="180">last 6 months</option><option value="90">last 3 months</option></select></span>
     · last
     <span class="sel"><select id="recent"><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="90">90 days</option></select></span>
     vs the
@@ -241,7 +239,6 @@ const LV = [
   ["orchestrated agents", "work split across several agents or tools"],
   ["ran an autonomous system", "agents ran on their own for hours or days"],
 ];
-const RANGES = { all: null, 365: 365, 180: 180, 90: 90 };
 const $ = (id) => document.getElementById(id);
 
 const PROMPT = `I track my AI-assistant habits with a local tool called "judge my ai habits". Use its database to coach me on getting more out of AI.
@@ -273,9 +270,8 @@ if (!RAW || !RAW.sessions) {
 }
 const ALL = RAW.sessions.sort((a, b) => a.t - b.t);
 const META = RAW.meta;
-const DEF = { set: "personal", range: "all", recent: String(META.recent_days), baseline: String(META.baseline_days), harness: "*", machine: "*", metric: "n", sort: "t", dir: "-1", q: "", filter: "" };
+const DEF = { set: "personal", recent: String(META.recent_days), baseline: String(META.baseline_days), harness: "*", machine: "*", metric: "n", sort: "t", dir: "-1", q: "", filter: "" };
 const state = Object.assign({}, DEF, readHash());
-if (!(state.range in RANGES)) state.range = "all";
 if (!["n", "k", "c", "l"].includes(state.metric)) state.metric = "n";
 let limit = 30;
 
@@ -346,8 +342,8 @@ const tieWords = (r) => (r == null ? null : r >= 0.7 ? "closely" : r >= 0.4 ? "m
 // ---------- scoping ----------
 function scope() {
   let xs = ALL.filter((s) => (state.set === "all" || s.p) && (state.harness === "*" || s.h === state.harness) && (state.machine === "*" || s.m === state.machine));
-  const end = Date.now(), start = RANGES[state.range] ? end - RANGES[state.range] * DAY : -Infinity;
-  return { xs: xs.filter((s) => s.t >= start && s.t < end), end };
+  const end = Date.now();
+  return { xs: xs.filter((s) => s.t < end), end };
 }
 function windows(xs, end) {
   if (!xs.length) return null;
@@ -377,7 +373,7 @@ function beforeLabel(note = false) {
 let ctx;
 function render() {
   writeHash();
-  ["set", "range", "recent", "baseline", "harness", "machine"].forEach((k) => ($(k).value = state[k]));
+  ["set", "recent", "baseline", "harness", "machine"].forEach((k) => ($(k).value = state[k]));
   document.querySelectorAll("#metric button").forEach((b) => b.classList.toggle("on", b.dataset.v === state.metric));
   const { xs, end } = scope();
   const w = windows(xs, end);
@@ -636,7 +632,7 @@ function init() {
   opts($("harness"), hs, "harnesses"); opts($("machine"), ms, "machines");
   if (hs.length < 2) $("hctl").style.display = "none";
   if (ms.length < 2) $("mctl").style.display = "none";
-  ["set", "range", "recent", "baseline", "harness", "machine"].forEach((k) => ($(k).onchange = (e) => { state[k] = e.target.value; state.filter = ""; limit = 30; render(); }));
+  ["set", "recent", "baseline", "harness", "machine"].forEach((k) => ($(k).onchange = (e) => { state[k] = e.target.value; state.filter = ""; limit = 30; render(); }));
   $("metric").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; state.metric = b.dataset.v; render(); };
   let qt; $("q").value = state.q;
   $("q").oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { state.q = e.target.value.trim(); limit = 30; renderTable(); writeHash(); }, 120); };

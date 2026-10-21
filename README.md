@@ -59,7 +59,7 @@ anonymized. Then it explains the complexity and leverage scales with your share
 of sessions at each level, compares your recent window with the one before in
 words, and shows whether more requests mean more tokens. You can also:
 
-- Pick the session set, time range, and comparison windows from the line at the top.
+- Pick the session set and comparison windows from the line at the top.
 - Click a level or a week to list its sessions.
 - Filter by **Harness** or **Machine**. Each dropdown appears when the database
   has scored sessions from more than one harness or machine. Choose one value or
