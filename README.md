@@ -54,8 +54,9 @@ open it. It has no external requests and works offline.
 <summary>Explore the dashboard controls and example charts</summary>
 
 It opens with a plain-language TL;DR and a copy-paste prompt you can give your
-own AI agent for advice; the dashboard itself only describes, because its data is
-anonymized. Then it explains the complexity and leverage scales with your share
+own AI agent for advice: the agent uses the scores to pick sessions, then reads
+those transcripts locally for the why. The dashboard itself only describes,
+because its data is anonymized. Then it explains the complexity and leverage scales with your share
 of sessions at each level, compares your recent window with the one before in
 words, and shows whether more requests mean more tokens. You can also:
 

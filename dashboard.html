@@ -166,7 +166,7 @@ footer code { font: 12px var(--mono); }
 
   <section id="ask">
     <h2>Want advice? Ask your own agent</h2>
-    <p class="intro">This page only describes your habits. It never gives advice, because the data behind it is anonymized on purpose: no titles, prompts or folders. Recommendations need that context, so they stay on your machine. Paste this prompt into the AI agent you already use; it reads your local database and suggests how to raise your leverage and complexity.</p>
+    <p class="intro">This page only describes your habits. It never gives advice, because the data behind it is anonymized on purpose: no titles, prompts or folders. Recommendations need that context, so they stay on your machine. Paste this prompt into the AI agent you already use; it uses the scores to pick out sessions worth studying, reads those sessions on your machine, and suggests how to raise your leverage and complexity.</p>
     <div class="prompt">
       <div class="bar"><span>Prompt for your agent</span><button class="copy" id="copy">Copy prompt</button></div>
       <pre id="prompt"></pre>
@@ -243,9 +243,9 @@ const LV = [
 ];
 const $ = (id) => document.getElementById(id);
 
-const PROMPT = `I track my AI-assistant habits with a local tool called "judge my ai habits". Use its database to coach me on getting more out of AI.
+const PROMPT = `I track my AI-assistant habits with a local tool called "judge my ai habits". Use its scores to find which of my sessions are worth studying, then read those sessions themselves to coach me on getting more out of AI.
 
-Database: ~/.local/share/judge-my-ai-habits/analytics.sqlite (SQLite). Open it read-only and don't change it.
+Scores: ~/.local/share/judge-my-ai-habits/analytics.sqlite (SQLite). Open it read-only and don't change it.
 
 Use the view human_sessions: one row per session I started myself (scored, personal work, not a fork, not launched by a program). The table sessions has every row, including scripted and test sessions.
 
@@ -256,12 +256,16 @@ Columns that matter:
 - user_messages, tool_calls, distinct_tools, subagent_sessions, files_edited, active_seconds, wall_seconds: how the session went.
 - tokens_total and cost_usd (both include subagent sessions); created_at (UTC); day, week, month (local time); harness; machine.
 
-The database deliberately holds no titles, prompts, folders or content. If you can also see my own session history on this machine, you may use it for concrete examples, but keep everything local.
+The database deliberately holds no titles, prompts, folders or content, so it can show which sessions stand out but not why. For the why, read the raw transcripts on this machine, read-only, matched by harness and session_id:
+- opencode: \`opencode api get "/api/session/<session_id>/message?limit=200"\` (OpenCode must be running; page with the cursor it returns)
+- claude: ~/.claude/projects/*/<session_id>.jsonl (Claude Desktop sessions: the same file name under ~/Library/Application Support/Claude/local-agent-mode-sessions)
+- codex: session_id is "codex:<id>"; the transcript is the file under ~/.codex/sessions (or $CODEX_HOME/sessions) whose name ends in <id>.jsonl
+Only sessions recorded on this machine have transcripts here; the machine column says where each one ran. Read a sample, about five high and five low sessions for each scale, not everything. Keep it all local: don't upload transcripts anywhere, and don't repeat secrets or credentials you come across.
 
 Please:
 1. Describe where I am: how my complexity and leverage are spread, and how my last 30 days compare with the 180 days before.
-2. Find patterns: what my high-leverage and high-complexity sessions have in common (messages, tool calls, subagents, length, time of day, harness), and how they differ from my low ones.
-3. Give me 3 to 5 concrete changes to how I work that would raise my leverage and let me hand off more complex work. Tie each one to a number from the data.
+2. Find patterns: from the numbers, what my high-leverage and high-complexity sessions have in common (messages, tool calls, subagents, length, time of day, harness) and how they differ from my low ones. Then read a few of each and tell me what I actually did differently: how I framed the goal, what context I gave, how much I handed off, and where I stepped in.
+3. Give me 3 to 5 concrete changes to how I work that would raise my leverage and let me hand off more complex work. Tie each one to a number from the data and to a session of mine that shows it (date and harness are enough).
 4. Propose one two-week experiment, and the exact SQL I can rerun afterwards to see whether it worked.`;
 
 let RAW;
