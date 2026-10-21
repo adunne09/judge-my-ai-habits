@@ -2,10 +2,14 @@
 # Usage: curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/latest/download/install.sh | bash
 set -euo pipefail
 
+# EXIT traps can run after function-local variables go out of scope on newer Bash.
+download=""
+stage=""
+
 main() {
   local version=${JMAIH_VERSION:-latest}
   local repository=https://github.com/adunne09/judge-my-ai-habits
-  local base bin_dir app_dir download stage
+  local base bin_dir app_dir
   command -v python3 >/dev/null 2>&1 || { echo "Install Python 3.9+ first: https://www.python.org/downloads/" >&2; return 1; }
   python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "Python 3.9+ is required.")'
   command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; return 1; }
