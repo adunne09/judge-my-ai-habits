@@ -43,7 +43,6 @@ h2 { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 8px
 .kicker { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); margin-bottom: 14px; }
 .lead { font-size: 27px; line-height: 1.38; font-weight: 400; letter-spacing: -0.015em; margin: 0; }
 .lead b { font-weight: 600; }
-.lead b.num { color: var(--accent); }
 .tldr { list-style: none; padding: 0; margin: 28px 0 0; }
 .tldr li { padding: 10px 0 10px 22px; position: relative; color: var(--ink2); max-width: 700px; }
 .tldr li::before { content: "–"; position: absolute; left: 0; color: var(--ink3); }
@@ -397,20 +396,17 @@ function fitSelects() {
   m.remove();
 }
 
-// Color the figure in a comparison ("37% more", "2.5×") so the headline numbers stand out.
-const num = (c) => ({ ...c, w: c.w.replace(/\d[\d.,]*(%|×)?/, (m) => `<b class="num">${m}</b>`) });
-
 function renderTldr() {
   const { xs, w, R, B, tk } = ctx;
   const who = state.set === "personal" ? "personal sessions" : "sessions";
   if (!R) { $("lead").textContent = "No scored sessions in this view yet."; $("tldr").innerHTML = ""; return; }
-  let lead = `In the last ${days(w.rDays)} you ran <b class="num">${R.n.toLocaleString()}</b> <b>${R.n === 1 ? who.slice(0, -1) : who}</b>`;
+  let lead = `In the last ${days(w.rDays)} you ran <b>${R.n.toLocaleString()} ${R.n === 1 ? who.slice(0, -1) : who}</b>`;
   if (B) {
     const sc = rel(R.s30, B.s30), kc = rel(R.k30, B.k30);
     const size = shareWords(R.c3, B.c3) === "about the same" && lvl(R.cMed, 6) === lvl(B.cMed, 6) ? "same" : R.c3 > B.c3 ? "bigger" : "smaller";
-    if (sc) lead += `, ${pace(num(sc), beforeLabel())}`;
-    lead += !kc ? "." : `. Token use per 30 days ${kc.kind === "same" ? "held about steady" : `was ${level(num(kc))}`}`;
-    lead += size === "same" ? ". The work was about the same size." : `. The work got ${size}: <b class="num">${pc(R.c3)}</b> of sessions were a day or more of work, ${R.c3 > B.c3 ? "up" : "down"} from ${pc(B.c3)}.`;
+    if (sc) lead += `, ${pace(sc, beforeLabel())}`;
+    lead += !kc ? "." : `. Token use per 30 days ${kc.kind === "same" ? "held about steady" : `was <b>${level(kc)}</b>`}`;
+    lead += size === "same" ? ". The work was about the same size." : `. The work got ${size}: ${pc(R.c3)} of sessions were a day or more of work, ${R.c3 > B.c3 ? "up" : "down"} from ${pc(B.c3)}.`;
   } else lead += ". There's no earlier history yet to compare against.";
   $("lead").innerHTML = lead;
 
