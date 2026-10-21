@@ -19,7 +19,6 @@ On macOS or Linux with **Python 3.9+** and `curl`, set your
 [TypeSafe API key](https://console.typesafe.ai) and run:
 
 ```sh
-export TYPESAFE_API_KEY="your-key"
 curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/latest/download/run.sh | bash
 ```
 
