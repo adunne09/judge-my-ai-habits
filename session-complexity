@@ -36,7 +36,7 @@ TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 HOME = str(pathlib.Path.home())
 HARNESS = "opencode"
 _DATA = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local" / "share"))
-_NEW_DB = _DATA / "judge-my-ai-habits" / "sessions.sqlite"
+_NEW_DB = _DATA / "judge-my-ai-habits" / "analytics.sqlite"
 _LEGACY_DB = _DATA / "opencode-session-complexity" / "sessions.sqlite"  # pre-rename location
 DEFAULT_DB = _LEGACY_DB if _LEGACY_DB.exists() and not _NEW_DB.exists() else _NEW_DB
 

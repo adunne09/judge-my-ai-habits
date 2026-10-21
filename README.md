@@ -270,7 +270,7 @@ counts include subagents.
 | `--all` | Include tests, scripted jobs, and forks |
 | `--db PATH` | Read a different database, for example a merged one |
 
-Results go to `~/.local/share/judge-my-ai-habits/sessions.sqlite`. Change that
+Results go to `~/.local/share/judge-my-ai-habits/analytics.sqlite`. Change that
 with `--db`. (A database at the older `opencode-session-complexity` location
 keeps being used if it exists.) Each row is keyed by `(machine, session_id)` and
 records its `harness`. `machine` is the short hostname; override it with
@@ -301,8 +301,8 @@ databases to one place and merge them:
 
 ```sh
 mkdir -p data
-scp laptop:.local/share/judge-my-ai-habits/sessions.sqlite data/laptop.sqlite
-scp desktop:.local/share/judge-my-ai-habits/sessions.sqlite data/desktop.sqlite
+scp laptop:.local/share/judge-my-ai-habits/analytics.sqlite data/laptop.sqlite
+scp desktop:.local/share/judge-my-ai-habits/analytics.sqlite data/desktop.sqlite
 ./session-complexity merge data/*.sqlite -o all.sqlite
 ./session-complexity report --db all.sqlite
 ```
