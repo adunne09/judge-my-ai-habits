@@ -449,9 +449,11 @@ about $0.14.
 Changing adapter code or `--model` alone does not invalidate existing rows. Use
 `--rescore` to apply those changes to every session.
 
-At the end of an interactive run (stdin and stdout are a terminal), the script asks
+At the end of a run in a terminal, the script asks
 `Open the dashboard in your browser? [Y/n]`. Enter opens it; `n`, Ctrl-C, or
-Ctrl-D doesn't. Pipes, scripts, and CI are never asked. `--open` opens without
+Ctrl-D doesn't. This works with the `curl ... | bash` one-liner too: the answer
+is read from the terminal, not from the pipe. Runs whose output isn't a terminal
+(scripts, CI, redirects) are never asked. `--open` opens without
 asking and `--no-open` skips the question; `dashboard` takes the same flags.
 
 Other `score` options:

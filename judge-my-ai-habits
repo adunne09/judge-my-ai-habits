@@ -1565,15 +1565,39 @@ def open_in_browser(path):
         print(f"warning: could not open the dashboard ({e}); open {path} yourself", file=sys.stderr)
 
 
+def ask_terminal(prompt):
+    """Ask a question on the user's terminal and return the answer, or None if no one can answer.
+
+    With `curl ... | bash`, stdin is the downloaded script rather than the keyboard, so read
+    the answer from the controlling terminal (/dev/tty) instead. Output that isn't going to a
+    terminal (scripts, CI, redirects) never waits on a question.
+    """
+    if not sys.stdout.isatty():
+        return None
+    if sys.stdin.isatty():
+        return input(prompt)
+    try:
+        # Separate read and write handles: a terminal isn't seekable, so "r+" can't open it.
+        with open("/dev/tty") as keyboard, open("/dev/tty", "w") as screen:
+            screen.write(prompt)
+            screen.flush()
+            line = keyboard.readline()
+    except OSError:
+        return None  # no controlling terminal
+    if not line:
+        raise EOFError
+    return line
+
+
 def offer_to_open(path, choice=None):
-    """--open opens, --no-open doesn't; otherwise ask, but only in an interactive terminal."""
+    """--open opens, --no-open doesn't; otherwise ask, but only when someone is at a terminal."""
     if choice is None:
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return  # scripts, pipes, and CI never wait on a question
         try:
-            answer = input("Open the dashboard in your browser? [Y/n] ")
+            answer = ask_terminal("Open the dashboard in your browser? [Y/n] ")
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
+            return
+        if answer is None:
             return
         choice = answer.strip().lower() in ("", "y", "yes")
     if choice:

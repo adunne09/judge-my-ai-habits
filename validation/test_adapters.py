@@ -320,15 +320,34 @@ class MultiHarnessTests(unittest.TestCase):
         self.assertEqual(sc.describe_pending({"scored": 1345, "new": 3}), "1,345 already scored, skipped; 3 new to score")
 
 
+class FakeTerminal(io.StringIO):
+    """/dev/tty stand-in: the prompt is written to the screen, the answer is what was typed."""
+    def write(self, text):
+        return len(text)
+
+
 class OpenPromptTests(unittest.TestCase):
-    def offer(self, choice=None, tty=True, answer=""):
+    def offer(self, choice=None, tty=True, answer="", stdin_tty=None, dev_tty=None):
+        """dev_tty: text the user types at /dev/tty, or None when there's no terminal."""
         opened = []
         def fake_input(prompt):
             if isinstance(answer, BaseException):
                 raise answer
             return answer
+        real_open = open
+        def fake_open(name, *a, **k):
+            if name != "/dev/tty":
+                return real_open(name, *a, **k)
+            if dev_tty is None:
+                raise OSError(6, "Device not configured")
+            mode = a[0] if a else k.get("mode", "r")
+            if "+" in mode:
+                raise io.UnsupportedOperation("File or stream is not seekable.")
+            return FakeTerminal(dev_tty)
+        stdin_tty = tty if stdin_tty is None else stdin_tty
         with patch.object(sc, "open_in_browser", opened.append), patch("builtins.input", fake_input), \
-                patch("sys.stdin.isatty", lambda: tty), patch("sys.stdout.isatty", lambda: tty), \
+                patch("builtins.open", fake_open), \
+                patch("sys.stdin.isatty", lambda: stdin_tty), patch("sys.stdout.isatty", lambda: tty), \
                 contextlib.redirect_stderr(io.StringIO()):
             sc.offer_to_open("/tmp/dashboard.html", choice)
         return bool(opened)
@@ -346,6 +365,14 @@ class OpenPromptTests(unittest.TestCase):
         self.assertTrue(self.offer(choice=True, tty=False, answer=EOFError()))
         self.assertFalse(self.offer(choice=False, answer=""))
         self.assertFalse(self.offer(tty=False, answer=""))
+
+    def test_curl_pipe_asks_on_the_terminal(self):
+        # curl | bash: stdin is the script, stdout is the terminal; the answer comes from /dev/tty.
+        self.assertTrue(self.offer(stdin_tty=False, answer=EOFError(), dev_tty="\n"))
+        self.assertTrue(self.offer(stdin_tty=False, answer=EOFError(), dev_tty="yes\n"))
+        self.assertFalse(self.offer(stdin_tty=False, answer=EOFError(), dev_tty="n\n"))
+        self.assertFalse(self.offer(stdin_tty=False, answer=EOFError(), dev_tty=""))
+        self.assertFalse(self.offer(stdin_tty=False, answer=EOFError(), dev_tty=None))
 
 
 if __name__ == "__main__":
