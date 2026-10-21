@@ -1,24 +1,19 @@
-# judge-my-ai-habits
+![judge-my-ai-habits — Get better at AI](charts/readme-banner.png)
 
-See how effectively you work with AI, and how your habits are changing over time.
+## TL;DR
 
-It discovers your past sessions across **OpenCode, Claude Code / Cowork, and
-Codex**, then has a model judge each one on
-two things:
+**Are you asking AI bigger questions—or just burning more tokens?**
 
-- **Complexity:** how big was the work you asked for? From a couple of minutes
-  up to months of work for a team.
-- **Leverage:** how much of it did you hand over? From a question answered on
-  the spot up to an autonomous loop of agents.
+Turn your **Claude Code / Cowork, Codex, and OpenCode** history into an interactive
+dashboard of your AI habits. See how ambitious your tasks are, how much you
+delegate, and how your token usage changes over time—all across harnesses and
+machines.
 
-Then it shows where most of your work sits, and whether it has moved toward
-bigger jobs and more delegation than in the months before.
+**One script. Your existing sessions. No tracking setup.** Requires Python 3.9+
+and a [TypeSafe API key](https://console.typesafe.ai). Session summaries go to
+TypeSafe for scoring; your results and dashboard stay local.
 
-It also measures **token usage** from the harness records, including subagents,
-and compares totals, usage per 30 days, and usage per session over time. Tokens
-are counted in code; complexity and leverage are judged by the model.
-
-### Run without installing
+## Try it
 
 On macOS or Linux with **Python 3.9+** and `curl`, set your
 [TypeSafe API key](https://console.typesafe.ai) and run:
@@ -28,11 +23,62 @@ export TYPESAFE_API_KEY="your-key"
 curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/latest/download/run.sh | bash
 ```
 
-That's it: it discovers your sessions, scores new or changed ones, and prints
-the database and dashboard paths. The runner downloads the latest release,
-verifies its SHA-256 checksum, runs it from a temporary directory, then removes
-the downloaded code. **No clone, installation, or PATH changes.** Your results
-persist at `~/.local/share/judge-my-ai-habits/` (or under `$XDG_DATA_HOME`).
+Open the dashboard path printed at the end. Re-run the same command whenever you
+want an update; it scores only new or changed sessions.
+
+**No clone, installation, or PATH changes.** The runner verifies the download,
+runs it temporarily, and cleans up the code afterward. Your results persist at
+`~/.local/share/judge-my-ai-habits/` (or under `$XDG_DATA_HOME`).
+
+## Your habits, at a glance
+
+Three lenses on the work you do with AI:
+
+- **Complexity:** how big was the task you asked for?
+- **Leverage:** how much of the work did you delegate?
+- **Tokens:** how much usage did it take, including subagents?
+
+Complexity and leverage are model judgments; token usage comes from your harness
+records. Compare your last 30 days with earlier work and explore individual sessions.
+
+![Interactive dashboard showing AI session complexity, leverage, and token trends](charts/dashboard.png)
+
+*Example from the October 20, 2026 single-harness dataset. Your dashboard uses
+your own sessions and shows harness/machine filters when multiple are present.*
+
+Every completed scoring run (except `--dry-run`) also writes a self-contained,
+interactive HTML dashboard and prints its path. It has no external requests and
+works offline.
+
+<details>
+<summary>Explore the dashboard controls and example charts</summary>
+
+Click through time ranges and comparison windows. You can also:
+
+- Switch the curve between complexity and leverage.
+- Click a bar or a week to list its sessions.
+- Explore the size × delegation map.
+- Filter by **Harness** or **Machine**. Each dropdown appears when the database
+  has scored sessions from more than one harness or machine. Choose one value or
+  all; the charts, comparisons, and session list update together.
+- Sort scored sessions by date, complexity, leverage, or tokens; search by
+  session id, harness, or machine; open a session to see how Jev split its judgment.
+
+Harnesses with only empty/error rows do not appear in the dashboard. Harness
+comparison currently uses these filters; there is no side-by-side or stacked
+breakdown. Settings are kept in the URL, so a view can be bookmarked.
+
+Example charts from an earlier OpenCode dataset:
+
+![Complexity histogram](charts/complexity.svg)
+
+![Leverage histogram](charts/leverage.svg)
+
+![Weekly trend](charts/trend.svg)
+
+</details>
+
+### More ways to run
 
 Pass options or subcommands with `bash -s --`:
 
@@ -48,14 +94,18 @@ Each invocation downloads the tool again; the existing scores make repeat runs
 incremental. Reports and dashboard rendering need no API key. You can also save
 `run.sh` wherever you like and run `bash run.sh [options]`.
 
-For a pinned release:
+<details>
+<summary>Pin a release</summary>
 
 ```sh
 curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/download/v0.2.0/run.sh \
   | JMAIH_VERSION=v0.2.0 bash
 ```
 
-### Try it with your coding agent
+</details>
+
+<details>
+<summary>Or ask your coding agent to run it for you</summary>
 
 Paste this into the coding agent you use most:
 
@@ -75,46 +125,9 @@ sessions across all supported harnesses installed on this machine.
    (complexity, leverage, tokens), and give me the dashboard path it printed.
 ```
 
-Each session's summary is sent to [TypeSafe](https://www.typesafe.ai)'s Jev for
-scoring; the results stay on your machine. If another harness isn't supported yet,
-see [Add support for another harness](#add-support-for-another-harness).
+</details>
 
-Example charts from an earlier OpenCode dataset; your generated report and
-dashboard use the sessions available on your machines.
-
-![Complexity histogram](charts/complexity.svg)
-
-![Leverage histogram](charts/leverage.svg)
-
-![Weekly trend](charts/trend.svg)
-
-### Interactive dashboard
-
-Every completed scoring run (except `--dry-run`) also writes a self-contained,
-interactive HTML dashboard and prints its path. It has no external requests and
-works offline. Example from the October 20, 2026 single-harness dataset:
-
-![Dashboard](charts/dashboard.png)
-
-Click through time ranges and comparison windows. You can also:
-
-- Switch the curve between complexity and leverage.
-- Click a bar or a week to list its sessions.
-- Explore the size × delegation map.
-- Filter by **Harness** or **Machine**. Each dropdown appears when the database
-  has scored sessions from more than one harness or machine. Choose one value or
-  all; the charts, comparisons, and session list update together.
-- Sort scored sessions by date, complexity, leverage, or tokens; search by
-  session id, harness, or machine; open a session to see how Jev split its judgment.
-
-Harnesses with only empty/error rows do not appear in the dashboard. Harness
-comparison currently uses these filters; there is no side-by-side or stacked
-breakdown. Settings are kept in the URL, so a view can be bookmarked.
-
-```sh
-./judge-my-ai-habits dashboard          # re-render from the database and print the path
-./judge-my-ai-habits dashboard --open   # …and open it in your browser
-```
+Using another harness? See [Add support for another harness](#add-support-for-another-harness).
 
 ## How it works
 
