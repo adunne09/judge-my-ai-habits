@@ -1,0 +1,58 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python3 -m unittest discover -s validation -p 'test_*.py'
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Build portable artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+        run: bash scripts/build.sh "$VERSION" dist/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: judge-my-ai-habits-${{ inputs.version }}
+          path: dist/release/*
+          if-no-files-found: error
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          args=()
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$VERSION" dist/release/* \
+            --target "$GITHUB_SHA" --title "$VERSION" --generate-notes "${args[@]}"

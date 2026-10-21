@@ -18,7 +18,40 @@ It also measures **token usage** from the harness records, including subagents,
 and compares totals, usage per 30 days, and usage per session over time. Tokens
 are counted in code; complexity and leverage are judged by the model.
 
-### Try it
+### Install without cloning
+
+On macOS or Linux with **Python 3.9+** and `curl`:
+
+```sh
+curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/latest/download/install.sh | bash
+```
+
+Then set your [TypeSafe API key](https://console.typesafe.ai) and run:
+
+```sh
+export TYPESAFE_API_KEY="your-key"
+~/.local/bin/judge-my-ai-habits
+~/.local/bin/judge-my-ai-habits dashboard --open
+```
+
+The installer verifies the release archive's SHA-256 checksum and installs the
+script and dashboard template together. No Python packages or `sudo` are needed.
+The command goes in `~/.local/bin`; add that directory to `PATH` to run
+`judge-my-ai-habits` from anywhere. Re-run the installer to upgrade. Existing
+analytics are preserved, and scoring starts only when you run the installed command.
+
+For a pinned release:
+
+```sh
+curl -fsSL https://github.com/adunne09/judge-my-ai-habits/releases/latest/download/install.sh \
+  | JMAIH_VERSION=v0.1.0 bash
+```
+
+Set `JMAIH_BIN_DIR` and/or `JMAIH_INSTALL_DIR` on the `bash` command to customize
+the command and application locations. By default, application files live under
+`${XDG_DATA_HOME:-~/.local/share}/judge-my-ai-habits/app/releases/`.
+
+### Try it with your coding agent
 
 Paste this into the coding agent you use most:
 
@@ -26,11 +59,13 @@ Paste this into the coding agent you use most:
 Run judge-my-ai-habits (https://github.com/adunne09/judge-my-ai-habits) on my
 sessions across all supported harnesses installed on this machine.
 
-1. If the repo isn't cloned locally yet, clone it. Read README.md.
+1. Install the latest release using the installer in README.md, or use an existing
+   clone. Read https://github.com/adunne09/judge-my-ai-habits#readme.
 2. Check the "Supported harnesses" table in README.md. The script discovers all
    supported harnesses automatically, regardless of which agent is running it.
 3. If TYPESAFE_API_KEY isn't set, ask me for it. Never print, log, or commit it.
-4. Run `./judge-my-ai-habits`, then `./judge-my-ai-habits report`. Only read the
+4. Run `~/.local/bin/judge-my-ai-habits` (or `./judge-my-ai-habits` in a clone;
+   use the custom path if configured), then the same command with `report`. Only read the
    harnesses' data; never modify it. Mention any skipped or failed harnesses.
 5. In a few sentences, tell me how my last 30 days compare with the time before
    (complexity, leverage, tokens), and give me the dashboard path it printed.
@@ -316,6 +351,10 @@ Known gaps:
   to detect updates. Repeated prompts are preserved even without message ids.
 
 ## Run it
+
+The examples below use a checkout. With the installer, replace
+`./judge-my-ai-habits` with `~/.local/bin/judge-my-ai-habits` (or simply
+`judge-my-ai-habits` if it is on your `PATH`).
 
 The scoring script uses only the Python standard library. It needs Python 3.9+
 on macOS or Linux and local data from a supported harness. Keep `dashboard.html`
@@ -789,6 +828,40 @@ FROM human_sessions ORDER BY complexity DESC LIMIT 20;
 The `day`, `week`, and `month` columns use the local time of the machine that ran
 the script. `created_ms` and `created_at` (UTC) are there for anything finer.
 
+## Build and publish a release
+
+Maintainers can build the portable macOS/Linux package manually from a checkout:
+
+```sh
+python3 -m unittest discover -s validation -p 'test_*.py'
+bash scripts/build.sh v0.1.0
+```
+
+This writes three files to `dist/v0.1.0/`:
+
+- `judge-my-ai-habits.tar.gz` — the Python script, dashboard template, and version
+- `install.sh` — the standalone Bash installer
+- `SHA256SUMS` — SHA-256 checksums for both files
+
+The archive uses an explicit file allowlist and reproducible metadata. It contains
+no local sessions, databases, API keys, or generated dashboards. The same package
+works on macOS and Linux, on Apple Silicon/ARM and Intel/AMD, using Python 3.9+.
+
+After committing and pushing the source, publish the files with the GitHub CLI
+(use a **new version** for each release):
+
+```sh
+gh release create v0.1.0 dist/v0.1.0/* \
+  --target "$(git rev-parse HEAD)" --title v0.1.0 --generate-notes
+```
+
+Alternatively, choose **Actions → Build and release → Run workflow** on GitHub
+and enter the new version. The manual workflow runs the tests on macOS and Linux,
+builds the files, and uploads them both as workflow artifacts and GitHub Release
+assets. Versions containing a suffix such as `-rc.1` become prereleases; the
+default installer follows the latest stable release. Releases are only created
+when explicitly requested, not on every push.
+
 ## Add support for another harness
 
 [SPEC.md](SPEC.md) defines the whole method independently of any harness: the
@@ -904,8 +977,12 @@ unsure about.
 | --- | --- |
 | `judge-my-ai-habits` | The tool: harness adapters, state builder, Jev client, `score`, `merge`, `report`, `dashboard` |
 | `dashboard.html` | Template for the interactive dashboard; `dashboard` fills it with data from the database |
+| `scripts/build.sh` | Builds a portable release archive, installer, and checksums |
+| `scripts/install.sh` | Downloads, verifies, and installs a release without cloning |
+| `.github/workflows/release.yml` | Manually triggered macOS/Linux checks and GitHub Release publishing |
 | `SPEC.md` | Harness-independent specification of the method |
 | `make_charts.py` | Regenerates `charts/*.svg` from a results database |
 | `validation/agreement.py` | Spearman and error between your hand labels and the scores |
 | `validation/check_frontier.py`, `validation/frontier.py` | Synthetic frontier sessions that must score at the top of the scale |
 | `validation/test_adapters.py` | Offline synthetic regression checks for Codex and combined discovery; run `python3 -m unittest discover -s validation -p 'test_*.py'` |
+| `validation/test_distribution.py` | Offline build, install, upgrade, and packaged-dashboard checks |
