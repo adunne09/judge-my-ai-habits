@@ -322,10 +322,20 @@ function pace(c, than) {
   if (c.kind === "frac") return `${c.w} the pace of ${than}`;
   return `a pace ${c.w.replace("more", "higher").replace("fewer", "lower")} than ${than}`;
 }
-// "2.6× what it was", "57% higher", "about half what it was"
-const level = (c) => (c.kind === "times" || c.kind === "frac" ? `${c.w} what it was` : c.w.replace("more", "higher").replace("fewer", "lower"));
-// ", up to 12.4M tokens in the last 30 days": the recent window's total, in the direction of a rel() change
-const totalWords = (c, total, period) => `, ${c.kind === "same" ? "steady at" : c.kind === "times" || c.kind === "more" ? "up to" : "down to"} ${tok(total)} tokens in the last ${period}`;
+// "<b>1.66B tokens</b>", "<b>1 token</b>"
+const tokTotal = (n) => `<b>${tok(n)} ${n === 1 ? "token" : "tokens"}</b>`;
+// The TL;DR's token sentence: the change in token rate against the earlier window (from rel()), then the window's total.
+// "Token use ran at <b>2.6× its earlier rate</b>, <b>1.66B tokens</b> in total."
+function tokenSentence(c, total) {
+  if (total == null) return "";
+  if (total === 0) return " No tokens were recorded.";
+  if (!c) return ` You used ${tokTotal(total)}; there's no earlier token count to compare.`;
+  const change = c.kind === "same" ? "held <b>about steady</b>"
+    : c.kind === "times" ? `ran at <b>${c.w} its earlier rate</b>`
+    : c.kind === "frac" ? `ran at <b>${c.w} of its earlier rate</b>`
+    : `ran <b>${c.w.replace("more", "above").replace("fewer", "below")} its earlier rate</b>`;
+  return ` Token use ${change}, ${tokTotal(total)} in total.`;
+}
 const relWords = (a, b) => { const c = rel(a, b); return c ? (c.kind === "times" ? `${c.w} as many` : c.kind === "frac" ? `${c.w} as many` : c.w) : null; };
 // Shares of sessions, compared in percentage points. Under 3 points counts as "about the same".
 function shareWords(a, b) {
@@ -407,9 +417,9 @@ function renderTldr() {
     const sc = rel(R.s30, B.s30), kc = rel(R.k30, B.k30);
     const size = shareWords(R.c3, B.c3) === "about the same" && lvl(R.cMed, 6) === lvl(B.cMed, 6) ? "same" : R.c3 > B.c3 ? "bigger" : "smaller";
     if (sc) lead += `, ${pace(sc, beforeLabel())}`;
-    lead += !kc ? "." : `. Token use per 30 days ${kc.kind === "same" ? "held about steady" : `was <b>${level(kc)}</b>`}${totalWords(kc, R.kSum, days(w.rDays))}`;
-    lead += size === "same" ? ". The work was about the same size." : `. The work got ${size}: ${pc(R.c3)} of sessions were a day or more of work, ${R.c3 > B.c3 ? "up" : "down"} from ${pc(B.c3)}.`;
-  } else lead += ". There's no earlier history yet to compare against.";
+    lead += "." + tokenSentence(kc, R.kSum);
+    lead += size === "same" ? " The work was about the same size." : ` The work got ${size}: ${pc(R.c3)} of sessions were a day or more of work, ${R.c3 > B.c3 ? "up" : "down"} from ${pc(B.c3)}.`;
+  } else lead += (R.kSum ? ` and used ${tokTotal(R.kSum)}` : "") + ". There's no earlier history yet to compare against.";
   $("lead").innerHTML = lead;
 
   const items = [];
