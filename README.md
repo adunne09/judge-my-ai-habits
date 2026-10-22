@@ -1019,3 +1019,4 @@ unsure about.
 | `validation/check_frontier.py`, `validation/frontier.py` | Synthetic frontier sessions that must score at the top of the scale |
 | `validation/test_adapters.py` | Offline synthetic regression checks for Codex and combined discovery; run `python3 -m unittest discover -s validation -p 'test_*.py'` |
 | `validation/test_distribution.py` | Offline build, runner cleanup, argument forwarding, and packaged-dashboard checks |
+| `validation/test_dashboard.py` | Dashboard TL;DR wording (token total up, down or steady), run in Node; skipped without `node` |

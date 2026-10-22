@@ -324,6 +324,8 @@ function pace(c, than) {
 }
 // "2.6× what it was", "57% higher", "about half what it was"
 const level = (c) => (c.kind === "times" || c.kind === "frac" ? `${c.w} what it was` : c.w.replace("more", "higher").replace("fewer", "lower"));
+// ", up to 12.4M tokens in the last 30 days": the recent window's total, in the direction of a rel() change
+const totalWords = (c, total, period) => `, ${c.kind === "same" ? "steady at" : c.kind === "times" || c.kind === "more" ? "up to" : "down to"} ${tok(total)} tokens in the last ${period}`;
 const relWords = (a, b) => { const c = rel(a, b); return c ? (c.kind === "times" ? `${c.w} as many` : c.kind === "frac" ? `${c.w} as many` : c.w) : null; };
 // Shares of sessions, compared in percentage points. Under 3 points counts as "about the same".
 function shareWords(a, b) {
@@ -362,7 +364,7 @@ function summary(xs, days) {
   const per30 = days > 0 ? 30 / days : 0, k = xs.filter((s) => s.k != null).map((s) => s.k), lv = xs.filter((s) => s.l != null);
   const cdist = new Array(7).fill(0), ldist = new Array(6).fill(0);
   xs.forEach((s) => cdist[lvl(s.c, 6)]++); lv.forEach((s) => ldist[lvl(s.l, 5)]++);
-  return { n: xs.length, s30: xs.length * per30, k30: k.length ? sum(k) * per30 : null, kMed: median(k), kCover: k.length / xs.length,
+  return { n: xs.length, s30: xs.length * per30, k30: k.length ? sum(k) * per30 : null, kSum: k.length ? sum(k) : null, kMed: median(k), kCover: k.length / xs.length,
     cMed: median(xs.map((s) => s.c)), lMed: lv.length ? median(lv.map((s) => s.l)) : null,
     cdist: cdist.map((c) => c / xs.length), ldist: lv.length ? ldist.map((c) => c / lv.length) : null,
     c3: xs.filter((s) => s.c >= 2.5).length / xs.length, l3: lv.length ? lv.filter((s) => s.l >= 2.5).length / lv.length : null };
@@ -405,7 +407,7 @@ function renderTldr() {
     const sc = rel(R.s30, B.s30), kc = rel(R.k30, B.k30);
     const size = shareWords(R.c3, B.c3) === "about the same" && lvl(R.cMed, 6) === lvl(B.cMed, 6) ? "same" : R.c3 > B.c3 ? "bigger" : "smaller";
     if (sc) lead += `, ${pace(sc, beforeLabel())}`;
-    lead += !kc ? "." : `. Token use per 30 days ${kc.kind === "same" ? "held about steady" : `was <b>${level(kc)}</b>`}`;
+    lead += !kc ? "." : `. Token use per 30 days ${kc.kind === "same" ? "held about steady" : `was <b>${level(kc)}</b>`}${totalWords(kc, R.kSum, days(w.rDays))}`;
     lead += size === "same" ? ". The work was about the same size." : `. The work got ${size}: ${pc(R.c3)} of sessions were a day or more of work, ${R.c3 > B.c3 ? "up" : "down"} from ${pc(B.c3)}.`;
   } else lead += ". There's no earlier history yet to compare against.";
   $("lead").innerHTML = lead;
